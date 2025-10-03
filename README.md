@@ -1,0 +1,1 @@
+Rust implementation of the self-initializing/multiple polynomial quadratic sieve (SIQS/MPQS)

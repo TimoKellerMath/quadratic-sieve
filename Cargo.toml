@@ -1,0 +1,29 @@
+[package]
+name = "siqs"
+version = "0.1.0"
+edition = "2024"
+
+[profile.release]
+#opt-level = 2
+#debug = "line-tables-only"
+
+#[build]
+#rustflags = ["-C", "force-frame-pointers=yes"]
+
+[dependencies]
+#number_theory = { path = "src/number_theory.rs" }
+rand = "0.8"
+num-traits = "0.2.19"
+bit-vec = "0.8"
+colored_text = "0.3.0"
+itertools = "0.14.0"
+
+[dependencies.gmp-mpfr-sys]
+version = "1.6"
+default-features = false
+features = ["use-system-libs"]
+
+[dependencies.rug]
+version = "1.28"
+default-features = false
+features = ["integer", "std", "float"]
