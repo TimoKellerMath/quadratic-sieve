@@ -1,3 +1,5 @@
+// this file uses the computation of the multiplier and some sieve parameters from msieve
+
 use crate::number_theory::*;
 use num_traits::Zero;
 use rug::{Complete, Integer};
