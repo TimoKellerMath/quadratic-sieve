@@ -278,6 +278,113 @@ pub fn sieve_over_factorbase(
     logs[..NUM_SKIP_PRIMES].iter().sum::<u32>()
 }
 
+/// Blocked (segmented) version of the sieve which reuses `logs_for_polynomial`
+/// and processes the sieve window in cache‑friendly blocks of `block_size`.
+///
+/// - `sieve_interval_length`: half the window length (total_len = 2 * sieve_interval_length)
+/// - `factorbase`, `roots`, `logs`: same layout as existing code
+/// - `logs_for_polynomial`: caller‑owned buffer with length == 2 * sieve_interval_length
+/// - `block_size`: block size in elements (choose e.g. 8k .. 64k)
+///
+/// Returns sum of small logs (same as other variants).
+pub fn sieve_over_factorbase_blocked(
+    sieve_interval_length: usize,
+    factorbase: &[u32],
+    roots: &[Option<(u32, u32)>],
+    logs: &[u32],
+    logs_for_polynomial: &mut [u32],
+    block_size: usize,
+) -> u32 {
+    debug_assert_eq!(factorbase.len(), roots.len());
+    debug_assert_eq!(factorbase.len(), logs.len());
+    let total_len = 2usize * sieve_interval_length;
+    debug_assert_eq!(logs_for_polynomial.len(), total_len);
+    // reset buffer (wiederverwenden statt neu alloziieren)
+    logs_for_polynomial.fill(0);
+
+    const NUM_SKIP_PRIMES: usize = 6;
+    debug_assert!(NUM_SKIP_PRIMES >= 1);
+
+    // trivial case: if block_size >= total_len, fall back to non‑blocked style (but still reusing buffer)
+    let use_blocking = block_size > 0 && block_size < total_len;
+
+    if !use_blocking {
+        // simple fallback: do global stepping (similar to original, but reusing buffer)
+        for (&p, &roots_opt, &log) in izip!(factorbase, roots, logs).skip(NUM_SKIP_PRIMES) {
+            if let Some((root1, root2)) = roots_opt {
+                let lower_bound: i32 = -(((sieve_interval_length as i64) % (p as i64)) as i32);
+                let index1 = if root1 as i32 >= lower_bound {
+                    (root1 as i32 - lower_bound) as usize
+                } else {
+                    (p as i32 + root1 as i32 - lower_bound) as usize
+                };
+                let step = p as usize;
+                let mut i = index1;
+                while i < total_len {
+                    logs_for_polynomial[i] += log;
+                    i += step;
+                }
+                if root2 != root1 {
+                    let index2 = if root2 as i32 >= lower_bound {
+                        (root2 as i32 - lower_bound) as usize
+                    } else {
+                        (p as i32 + root2 as i32 - lower_bound) as usize
+                    };
+                    let mut i = index2;
+                    while i < total_len {
+                        logs_for_polynomial[i] += log;
+                        i += step;
+                    }
+                }
+            }
+        }
+    } else {
+        // blocked processing
+        let mut block_start = 0usize;
+        while block_start < total_len {
+            let block_end = (block_start + block_size).min(total_len);
+            for (&p, &roots_opt, &log) in izip!(factorbase, roots, logs).skip(NUM_SKIP_PRIMES) {
+                if let Some((root1, root2)) = roots_opt {
+                    let lower_bound: i32 = -(((sieve_interval_length as i64) % (p as i64)) as i32);
+                    let index1 = if root1 as i32 >= lower_bound {
+                        (root1 as i32 - lower_bound) as usize
+                    } else {
+                        (p as i32 + root1 as i32 - lower_bound) as usize
+                    };
+                    let p_usize = p as usize;
+
+                    // compute smallest i >= block_start with i ≡ index1 (mod p)
+                    let diff = index1 as isize - block_start as isize;
+                    let offset = (((diff % p as isize) + p as isize) % p as isize) as usize;
+                    let mut i = block_start + offset;
+                    while i < block_end {
+                        logs_for_polynomial[i] += log;
+                        i += p_usize;
+                    }
+
+                    if root2 != root1 {
+                        let index2 = if root2 as i32 >= lower_bound {
+                            (root2 as i32 - lower_bound) as usize
+                        } else {
+                            (p as i32 + root2 as i32 - lower_bound) as usize
+                        };
+                        let diff2 = index2 as isize - block_start as isize;
+                        let offset2 = (((diff2 % p as isize) + p as isize) % p as isize) as usize;
+                        let mut i2 = block_start + offset2;
+                        while i2 < block_end {
+                            logs_for_polynomial[i2] += log;
+                            i2 += p_usize;
+                        }
+                    }
+                }
+            }
+            block_start = block_end;
+        }
+    }
+
+    logs[..NUM_SKIP_PRIMES].iter().sum::<u32>()
+}
+
 // compute (u,y) with u^2 = v (n)
 // y = ((a x + b) + b) * x + c = ax^2 + 2bx + c = Q(x) = ((qx + b)^2 - n)/q
 // u = (qx + b) * q^-1 (n)
