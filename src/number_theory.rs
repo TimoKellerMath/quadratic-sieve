@@ -155,13 +155,14 @@ pub fn quadratic_non_residue_mod_p(p: &Integer) -> Result<Integer, NumberTheoryE
         // p = 3 (4) =>
         return Ok(Integer::from(-1)); // -1 is a quadratic non-residue
     }
-    let mut a = Integer::from(1);
+    let mut a;
     for q in SMALL_PRIMES {
         a = Integer::from(q);
         if a.legendre(p) == -1 {
             return Ok(a);
         }
     }
+    a = Integer::from(*SMALL_PRIMES.last().unwrap());
     loop {
         a += 1;
         if a.legendre(p) == -1 {
