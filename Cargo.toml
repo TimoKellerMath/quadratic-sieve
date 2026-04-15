@@ -19,10 +19,6 @@ strip = "none"
 lto = false
 codegen-units = 16
 
-[build]
-rustflags = ["-C", "target-cpu=native"]
-#rustflags = ["-C", "force-frame-pointers=yes"]
-
 [dependencies]
 #number_theory = { path = "src/number_theory.rs" }
 rand = "0.8"
