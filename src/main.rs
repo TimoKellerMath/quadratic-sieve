@@ -153,28 +153,57 @@ fn quadratic_sieve_multithreaded(
                         .saturating_sub(*logs.last().unwrap() as u32)
                         .saturating_sub(sum_small_logs)
                         .min(u8::MAX as u32) as u8;
-                    for (i, &log) in logs_for_polynomial.iter().enumerate() {
-                        let x = (i as i32) - (sieve_interval_length as i32);
+                    let total = logs_for_polynomial.len();
+                    let mut i = 0usize;
+                    #[cfg(target_feature = "avx2")]
+                    unsafe {
+                        use std::arch::x86_64::*;
+                        let thr_vec = _mm256_set1_epi8(threshold as i8);
+                        let ptr = logs_for_polynomial.as_ptr();
+                        while i + 32 <= total {
+                            let chunk = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
+                            // unsigned: chunk >= threshold  iff  max(chunk, thr) == chunk
+                            let maxv = _mm256_max_epu8(chunk, thr_vec);
+                            let eq = _mm256_cmpeq_epi8(maxv, chunk);
+                            let mask = _mm256_movemask_epi8(eq) as u32;
+                            if mask != 0 {
+                                let mut m = mask;
+                                while m != 0 {
+                                    let j = m.trailing_zeros() as usize;
+                                    m &= m - 1;
+                                    let idx = i + j;
+                                    let x = (idx as i32) - (sieve_interval_length as i32);
+                                    let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
+                                    if let Some((relation, big_prime)) = factor_over_factorbase(
+                                        x, &v, &factorbase, roots, k, large_prime_multiplier,
+                                    ) {
+                                        if sender1
+                                            .send((u, v, relation, big_prime, index_thread))
+                                            .is_err() {
+                                            break 'outer_loop;
+                                        }
+                                    }
+                                }
+                            }
+                            i += 32;
+                        }
+                    }
+                    while i < total {
+                        let log = logs_for_polynomial[i];
                         if log >= threshold {
-                            // trial divisions — evaluate polynomial using Horner's scheme
+                            let x = (i as i32) - (sieve_interval_length as i32);
                             let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
-                            // if Q(x) = v factored over factor base:
                             if let Some((relation, big_prime)) = factor_over_factorbase(
-                                x,
-                                &v,
-                                &factorbase,
-                                roots,
-                                k,
-                                large_prime_multiplier,
+                                x, &v, &factorbase, roots, k, large_prime_multiplier,
                             ) {
                                 if sender1
                                     .send((u, v, relation, big_prime, index_thread))
                                     .is_err() {
-                                    // terminate when the consumer loop has terminated (because it found a non-trivial factor)
                                     break 'outer_loop;
                                 }
                             }
                         }
+                        i += 1;
                     }
                 }
             });
