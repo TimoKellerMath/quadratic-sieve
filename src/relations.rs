@@ -326,13 +326,14 @@ pub fn sieve_over_factorbase_blocked(
 
     if !use_blocking {
         // fallback: single pass over the whole buffer, reusing buffer
+        let buf_ptr = logs_for_polynomial.as_mut_ptr();
         for (&p, &roots_opt, &log) in izip!(factorbase, roots, logs).skip(NUM_SKIP_PRIMES) {
             if let Some((root1, root2)) = roots_opt {
                 let p_us = p as usize;
                 let index1 = (root1 as usize + sieve_interval_length) % p_us;
                 let mut j = index1;
                 while j < total_len {
-                    logs_for_polynomial[j] += log;
+                    unsafe { *buf_ptr.add(j) = (*buf_ptr.add(j)).wrapping_add(log); }
                     j += p_us;
                 }
                 if root2 == root1 {
@@ -341,7 +342,7 @@ pub fn sieve_over_factorbase_blocked(
                 let index2 = (root2 as usize + sieve_interval_length) % p_us;
                 let mut j = index2;
                 while j < total_len {
-                    logs_for_polynomial[j] += log;
+                    unsafe { *buf_ptr.add(j) = (*buf_ptr.add(j)).wrapping_add(log); }
                     j += p_us;
                 }
             }
@@ -365,29 +366,33 @@ pub fn sieve_over_factorbase_blocked(
             }
         }
 
+        let buf_ptr = logs_for_polynomial.as_mut_ptr();
+        let next_pos_ptr = next_pos.as_mut_ptr();
         let mut block_start = 0usize;
         while block_start < total_len {
             let block_end = (block_start + block_size).min(total_len);
             let mut idx = 0usize;
             for (&p, &log) in izip!(factorbase, logs).skip(NUM_SKIP_PRIMES) {
                 let p_us = p as usize;
-                let pos1 = next_pos[idx];
-                if pos1 != usize::MAX {
-                    let mut j = pos1;
-                    while j < block_end {
-                        logs_for_polynomial[j] += log;
-                        j += p_us;
+                unsafe {
+                    let pos1 = *next_pos_ptr.add(idx);
+                    if pos1 != usize::MAX {
+                        let mut j = pos1;
+                        while j < block_end {
+                            *buf_ptr.add(j) = (*buf_ptr.add(j)).wrapping_add(log);
+                            j += p_us;
+                        }
+                        *next_pos_ptr.add(idx) = j;
                     }
-                    next_pos[idx] = j;
-                }
-                let pos2 = next_pos[idx + 1];
-                if pos2 != usize::MAX {
-                    let mut j = pos2;
-                    while j < block_end {
-                        logs_for_polynomial[j] += log;
-                        j += p_us;
+                    let pos2 = *next_pos_ptr.add(idx + 1);
+                    if pos2 != usize::MAX {
+                        let mut j = pos2;
+                        while j < block_end {
+                            *buf_ptr.add(j) = (*buf_ptr.add(j)).wrapping_add(log);
+                            j += p_us;
+                        }
+                        *next_pos_ptr.add(idx + 1) = j;
                     }
-                    next_pos[idx + 1] = j;
                 }
                 idx += 2;
             }

@@ -12,6 +12,13 @@ lto = "fat"
 strip = "symbols"
 panic = "abort"
 
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
+lto = false
+codegen-units = 16
+
 [build]
 rustflags = ["-C", "target-cpu=native"]
 #rustflags = ["-C", "force-frame-pointers=yes"]
