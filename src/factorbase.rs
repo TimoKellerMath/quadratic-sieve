@@ -21,15 +21,14 @@ pub fn make_factorbase(n: &Integer, size: usize) -> Vec<u32> {
 
 // compute log(scale * p) for p in the factor base
 pub fn compute_logs(factorbase: &[u32]) -> Vec<u32> {
-    let mut logs = Vec::with_capacity(factorbase.len()); // we know how many elements our result will have
-    for (i, p) in factorbase.iter().enumerate() {
-        if i == 0 {
-            logs.push(0); // log_2|-1|
-            continue;
-        }
-        logs.push(((*p as f32).log2() * (SCALE_LOGS as f32)).round() as u32); // round to nearest
-    }
-    logs
+    std::iter::once(0) // log_2|-1|
+        .chain(
+            factorbase
+                .iter()
+                .skip(1)
+                .map(|&p| ((p as f32).log2() * SCALE_LOGS as f32).round() as u32),
+        )
+        .collect()
 }
 
 // compute the sqrt(n) (mod p) for p in the factor base

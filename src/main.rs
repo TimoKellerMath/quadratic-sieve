@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
@@ -21,8 +22,6 @@ pub mod relations;
 use crate::relations::*;
 pub mod multiplier;
 use crate::multiplier::*;
-pub mod format_color;
-use crate::format_color::*;
 pub mod debug_print;
 
 fn quadratic_sieve_multithreaded(
@@ -33,11 +32,7 @@ fn quadratic_sieve_multithreaded(
     println!("k = {k}");
     let kn: Integer = n.clone() * k;
     // heuristic value for the factor base
-    let log2_kn = Float::with_val(PREC, &kn)
-        .log2()
-        .round()
-        .to_u32_saturating()
-        .unwrap() as usize;
+    let log2_kn = (kn.significant_bits() + 1) as usize;
     let (factorbase_size, sieve_interval_length, large_prime_multiplier) =
         compute_sieve_parameters(log2_kn);
     println!("factor base size: {factorbase_size}");
@@ -60,17 +55,18 @@ fn quadratic_sieve_multithreaded(
         &square_roots,
         &factorbase_without_k,
     );
-    //println!("factor base: {factorbase:?}");
     let logs = Arc::new(compute_logs(&factorbase));
     let factorbase = Arc::new(factorbase.clone());
     let kn_float = kn.to_f64();
     let n = Arc::new(n);
     let kn = Arc::new(kn.clone());
+    let found = Arc::new(AtomicBool::new(false));
     let shared_factor = Arc::new(Mutex::new(None));
     rayon::scope(|s| {
         let (sender, receiver) = mpsc::channel();
         // consumer thread: processes (partial) relations
         {
+            let found = Arc::clone(&found);
             let shared_factor = Arc::clone(&shared_factor);
             let factorbase = Arc::clone(&factorbase);
             let n = Arc::clone(&n);
@@ -88,7 +84,6 @@ fn quadratic_sieve_multithreaded(
                         u32,
                         usize,
                     ) = receiver.recv().unwrap();
-                    //println!("big_prime = {big_prime}\nrelation = {relation}");
                     // add relation, index, (u,v)
                     if big_prime > 1 {
                         if let Some((relation2, u2, v2)) = big_prime_relations.get(&big_prime) {
@@ -107,15 +102,13 @@ fn quadratic_sieve_multithreaded(
                     relations.add_relation(&relation, &(u, v));
                     // Gaussian elimination
                     if let Some(relation) = relations.gaussian_elimination() {
-                        //println!("{relation:?}");
                         debug_print!("{}", format_color("!", index_thread));
                         if let Some(factor) = relations.find_factor(&relation, &n) {
                             drop(receiver);
                             println!("\nfound factor: {factor} (thread #{index_thread})");
                             io::stdout().flush().unwrap();
                             *shared_factor.lock().unwrap() = Some(factor);
-                            // drop last relation, so the other threads don't use it
-                            //relations.drop_last_relation();
+                            found.store(true, Ordering::Relaxed);
                             return;
                         }
                         // relation was not useful, drop the last relation
@@ -126,7 +119,7 @@ fn quadratic_sieve_multithreaded(
         }
 
         for (index_thread, polynomial_generator) in polynomial_generators.iter_mut().enumerate() {
-            let shared_factor = Arc::clone(&shared_factor);
+            let found = Arc::clone(&found);
             let logs = Arc::clone(&logs);
             let factorbase = Arc::clone(&factorbase);
             let kn = Arc::clone(&kn);
@@ -138,11 +131,10 @@ fn quadratic_sieve_multithreaded(
                 let mut logs_for_polynomial = vec![0; 2 * sieve_interval_length];
 
                 'outer_loop: loop {
-                    if shared_factor.lock().unwrap().is_some() {
+                    if found.load(Ordering::Relaxed) {
                         break 'outer_loop;
                     }
                     let (polynomial, roots) = polynomial_generator.next_polynomial();
-                    //println!("polynomial: {polynomial:?}");
                     debug_print!("{}", format_color("?", index_thread));
                     let sum_small_logs = sieve_over_factorbase(
                         sieve_interval_length,
@@ -150,34 +142,23 @@ fn quadratic_sieve_multithreaded(
                         roots,
                         &logs,
                         &mut logs_for_polynomial,
-                        //&polynomial,
-                        //&kn,
                     );
-                    // add relations
-                    // target = log_2(kn/(a*sqrt(2)) * SCALE_LOGS - (scaled log of largest prime in factorbase) - (scaled log of sum of small logs)
-                    // note: kn/(a*sqrt(2)) \approx (sieve_interval_length)*sqrt(kn)
+                    // threshold = log_2(kn/a) * SCALE_LOGS - log of largest prime - sum of small logs
+                    // note: kn/a \approx sieve_interval_length * sqrt(kn)
                     let threshold: u32 = (((Float::with_val(PREC, kn_float)
-                    / Float::with_val(PREC, &polynomial.a)).log2() // / Float::with_val(PREC, 2.0).sqrt()
-                    * SCALE_LOGS)
+                        / Float::with_val(PREC, &polynomial.a))
+                        .log2()
+                        * SCALE_LOGS)
                         .to_u32_saturating()
                         .unwrap()
                         - logs.last().unwrap()
                         - sum_small_logs) as u32;
-                    // TODO: change into log_2(2 x sqrt{kn})
-                    /*let threshold_base: u32 = ((2f64 * kn_float.sqrt()).log2() * SCALE_LOGS) as u32 // TODO cache sqrt(kn);
-                    - (*logs.last().unwrap() as u32)
-                    - (sum_small_logs as u32);*/
                     for (i, &log) in logs_for_polynomial.iter().enumerate() {
                         let x = (i as i32) - (sieve_interval_length as i32);
-                        //let threshold_x = ((x.abs() as f64 + 1f64).log2() * SCALE_LOGS) as u32;
-                        //if log as u32 >= threshold_base + threshold_x {
                         if log as u32 >= threshold {
-                            //print!(",");
-                            // trial divisions
-                            // evaluate polynomial using Horner's scheme
+                            // trial divisions — evaluate polynomial using Horner's scheme
                             let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
-                            //println!("u = {u}, v = {v}");
-                            // if Q(x) = y factored over factor base:
+                            // if Q(x) = v factored over factor base:
                             if let Some((relation, big_prime)) =
                                 factor_over_factorbase(&v, &factorbase, k, large_prime_multiplier)
                             {
@@ -188,8 +169,6 @@ fn quadratic_sieve_multithreaded(
                                     break 'outer_loop;
                                 }
                             }
-                        } else {
-                            //print!("-");
                         }
                     }
                 }

@@ -10,20 +10,12 @@ use rug::{Complete, Float, Integer};
 
 #[inline]
 fn product_u32_to_integer(vector: &[u32]) -> Integer {
-    let mut result = Integer::from(1);
-    for x in vector {
-        result *= *x;
-    }
-    result
+    vector.iter().fold(Integer::from(1), |acc, &x| acc * x)
 }
 
 #[inline]
 fn product_refu32_to_f32(vector: &[&u32]) -> f32 {
-    let mut result = 1f32;
-    for x in vector {
-        result *= **x as f32;
-    }
-    result
+    vector.iter().map(|&&x| x as f32).product()
 }
 
 // one for each thread
@@ -47,8 +39,8 @@ pub struct SIQSPolynomialData<'a> {
     b: Integer, // the b for j
 
     n: &'a Integer,
-    factorbase: &'a Vec<u32>,
-    n_roots: &'a Vec<u32>, // the roots of n modulo the primes in the factor base
+    factorbase: &'a [u32],
+    n_roots: &'a [u32], // the roots of n modulo the primes in the factor base
     //sieve_interval_length: u64,
     //prime_factors_for_q: &'a Vec<u32>, // we choose the q from this subset of the factorbase
     pub num_polynomials: usize, // record the number of polynomials used
@@ -64,9 +56,9 @@ impl<'a> SIQSPolynomialData<'a> {
         num_a: usize,
         n: &'a Integer,
         sieve_interval_length: u64,
-        factorbase: &'a Vec<u32>,
+        factorbase: &'a [u32],
         prime_factors_for_q: &'a [u32],
-        roots: &'a Vec<u32>,
+        roots: &'a [u32],
     ) -> SIQSPolynomialData<'a> {
         let mut polynomial_data = SIQSPolynomialData {
             thread_number,
@@ -77,14 +69,14 @@ impl<'a> SIQSPolynomialData<'a> {
             prod_thread_specific_factors: product_u32_to_integer(thread_specific_factors),
             q: Integer::from(1),
             q_inverse_mod_n: Integer::from(1),
-            list_of_qis: Vec::<Vec<u32>>::new(),
+            list_of_qis: Vec::new(),
             num_a,                      // index of current element of list_of_qis
-            bis: Vec::<Integer>::new(), // for i = 1..s: B[i] = a/q[i] * gamma, gamma = sqrt(n mod p) * (a/q[i])^-1 (mod q[i])
-            q_inv_mod_ps: Vec::<Option<NonZero<u32>>>::with_capacity(factorbase.len()), //  for all p \nmid a in factorbase: (a^-1 mod p)
-            bainv2ips: Vec::<Vec<Option<u32>>>::new(), // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all p \nmid a in factorbase
+            bis: Vec::new(), // for i = 1..s: B[i] = a/q[i] * gamma, gamma = sqrt(n mod p) * (a/q[i])^-1 (mod q[i])
+            q_inv_mod_ps: Vec::with_capacity(factorbase.len()), //  for all p \nmid a in factorbase: (a^-1 mod p)
+            bainv2ips: Vec::new(), // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all p \nmid a in factorbase
             a: Integer::from(0),
             b: Integer::from(0), // the b for j,
-            roots: Vec::<Option<(u32, u32)>>::with_capacity(factorbase.len()),
+            roots: Vec::with_capacity(factorbase.len()),
             n,
             factorbase,
             n_roots: roots,
@@ -187,7 +179,7 @@ impl<'a> SIQSPolynomialData<'a> {
         let qis_by_quality = qis_with_quality
             .sorted_unstable_by_key(|(_, quality)| *quality)
             .map(|(combination, _)| combination);
-        self.list_of_qis = Vec::<Vec<u32>>::new();
+        self.list_of_qis = Vec::new();
         for qis in qis_by_quality {
             let mut new_qis: Vec<u32> = self.thread_specific_factors.to_vec();
             for q in qis {
@@ -265,7 +257,7 @@ impl<'a> SIQSPolynomialData<'a> {
         self.bainv2ips.clear();
         for b in self.bis.iter() {
             self.bainv2ips
-                .push(Vec::<Option<u32>>::with_capacity(factorbase.len()));
+                .push(Vec::with_capacity(factorbase.len()));
             let bainv2ips = self.bainv2ips.last_mut().unwrap();
             for (&ainvp, &p) in izip!(&self.q_inv_mod_ps, factorbase) {
                 if let Some(ainvp) = ainvp {
@@ -330,7 +322,7 @@ impl<'a> SIQSPolynomialData<'a> {
     }
 
     // returns the next polynomial and its roots modulo the primes in the factorbase
-    pub fn next_polynomial(&mut self) -> (Polynomial, &Vec<Option<(u32, u32)>>) {
+    pub fn next_polynomial(&mut self) -> (Polynomial, &[Option<(u32, u32)>]) {
         self.num_polynomials += 1;
 
         // the first polynomial has already been computed in initialize_new_set_of_polynomials()
@@ -490,8 +482,8 @@ pub fn new_polynomial_generators<'a>(
     n: &'a Integer,
     sieve_interval_length: u64,
     num_threads: usize,
-    factorbase: &'a Vec<u32>,
-    roots: &'a Vec<u32>,
+    factorbase: &'a [u32],
+    roots: &'a [u32],
     prime_factors_for_q: &'a [u32],
 ) -> Vec<SIQSPolynomialData<'a>> {
     let num_thread_factors = (1u32..)

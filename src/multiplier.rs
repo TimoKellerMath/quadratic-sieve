@@ -56,109 +56,29 @@ struct SieveParameter {
     sieve_size: usize,
 }
 
+// from msieve -> mpqs.c
+const SIEVE_PARAMETERS: &[SieveParameter] = &[
+    SieveParameter { bits: 64,  factorbase_size: 100,    large_prime_multiplier: 40,  sieve_size: 65536       },
+    SieveParameter { bits: 128, factorbase_size: 450,    large_prime_multiplier: 40,  sieve_size: 65536       },
+    SieveParameter { bits: 183, factorbase_size: 2000,   large_prime_multiplier: 40,  sieve_size: 65536       },
+    SieveParameter { bits: 200, factorbase_size: 3000,   large_prime_multiplier: 50,  sieve_size: 3 * 65536   },
+    SieveParameter { bits: 212, factorbase_size: 5400,   large_prime_multiplier: 50,  sieve_size: 3 * 65536   },
+    SieveParameter { bits: 233, factorbase_size: 10000,  large_prime_multiplier: 100, sieve_size: 3 * 65536   },
+    SieveParameter { bits: 249, factorbase_size: 27000,  large_prime_multiplier: 100, sieve_size: 3 * 65536   },
+    SieveParameter { bits: 266, factorbase_size: 50000,  large_prime_multiplier: 100, sieve_size: 3 * 65536   },
+    SieveParameter { bits: 283, factorbase_size: 55000,  large_prime_multiplier: 80,  sieve_size: 3 * 65536   },
+    SieveParameter { bits: 298, factorbase_size: 60000,  large_prime_multiplier: 80,  sieve_size: 9 * 65536   },
+    SieveParameter { bits: 315, factorbase_size: 80000,  large_prime_multiplier: 150, sieve_size: 9 * 65536   },
+    SieveParameter { bits: 332, factorbase_size: 100000, large_prime_multiplier: 150, sieve_size: 9 * 65536   },
+    SieveParameter { bits: 348, factorbase_size: 140000, large_prime_multiplier: 150, sieve_size: 9 * 65536   },
+    SieveParameter { bits: 363, factorbase_size: 210000, large_prime_multiplier: 150, sieve_size: 13 * 65536  },
+    SieveParameter { bits: 379, factorbase_size: 300000, large_prime_multiplier: 150, sieve_size: 17 * 65536  },
+    SieveParameter { bits: 395, factorbase_size: 400000, large_prime_multiplier: 150, sieve_size: 21 * 65536  },
+];
+
 // From the bit length bits of n, compute the factorbase size and the sieve size
 pub fn compute_sieve_parameters(bits: usize) -> (usize, usize, u32) {
-    // from msieve -> mpqs.c
-    let sieve_parameters: Vec<SieveParameter> = vec![
-        SieveParameter {
-            bits: 64,
-            factorbase_size: 100,
-            large_prime_multiplier: 40,
-            sieve_size: 65536,
-        },
-        SieveParameter {
-            bits: 128,
-            factorbase_size: 450,
-            large_prime_multiplier: 40,
-            sieve_size: 65536,
-        },
-        SieveParameter {
-            bits: 183,
-            factorbase_size: 2000,
-            large_prime_multiplier: 40,
-            sieve_size: 65536,
-        },
-        SieveParameter {
-            bits: 200,
-            factorbase_size: 3000,
-            large_prime_multiplier: 50,
-            sieve_size: 3 * 65536,
-        },
-        SieveParameter {
-            bits: 212,
-            factorbase_size: 5400,
-            large_prime_multiplier: 50,
-            sieve_size: 3 * 65536,
-        },
-        SieveParameter {
-            bits: 233,
-            factorbase_size: 10000,
-            large_prime_multiplier: 100,
-            sieve_size: 3 * 65536,
-        },
-        SieveParameter {
-            bits: 249,
-            factorbase_size: 27000,
-            large_prime_multiplier: 100,
-            sieve_size: 3 * 65536,
-        },
-        SieveParameter {
-            bits: 266,
-            factorbase_size: 50000,
-            large_prime_multiplier: 100,
-            sieve_size: 3 * 65536,
-        },
-        SieveParameter {
-            bits: 283,
-            factorbase_size: 55000,
-            large_prime_multiplier: 80,
-            sieve_size: 3 * 65536,
-        },
-        SieveParameter {
-            bits: 298,
-            factorbase_size: 60000,
-            large_prime_multiplier: 80,
-            sieve_size: 9 * 65536,
-        },
-        SieveParameter {
-            bits: 315,
-            factorbase_size: 80000,
-            large_prime_multiplier: 150,
-            sieve_size: 9 * 65536,
-        },
-        SieveParameter {
-            bits: 332,
-            factorbase_size: 100000,
-            large_prime_multiplier: 150,
-            sieve_size: 9 * 65536,
-        },
-        SieveParameter {
-            bits: 348,
-            factorbase_size: 140000,
-            large_prime_multiplier: 150,
-            sieve_size: 9 * 65536,
-        },
-        SieveParameter {
-            bits: 363,
-            factorbase_size: 210000,
-            large_prime_multiplier: 150,
-            sieve_size: 13 * 65536,
-        },
-        SieveParameter {
-            bits: 379,
-            factorbase_size: 300000,
-            large_prime_multiplier: 150,
-            sieve_size: 17 * 65536,
-        },
-        SieveParameter {
-            bits: 395,
-            factorbase_size: 400000,
-            large_prime_multiplier: 150,
-            sieve_size: 21 * 65536,
-        },
-    ];
-
-    let first_parameter = sieve_parameters.first().unwrap();
+    let first_parameter = &SIEVE_PARAMETERS[0];
     if bits <= first_parameter.bits {
         return (
             first_parameter.factorbase_size,
@@ -166,7 +86,7 @@ pub fn compute_sieve_parameters(bits: usize) -> (usize, usize, u32) {
             first_parameter.large_prime_multiplier,
         );
     }
-    let last_parameter = sieve_parameters.last().unwrap();
+    let last_parameter = SIEVE_PARAMETERS.last().unwrap();
     if bits >= last_parameter.bits {
         return (
             last_parameter.factorbase_size,
@@ -175,12 +95,12 @@ pub fn compute_sieve_parameters(bits: usize) -> (usize, usize, u32) {
         );
     }
 
-    let idx = sieve_parameters
+    let idx = SIEVE_PARAMETERS
         .iter()
         .position(|parameter| bits <= parameter.bits)
         .unwrap();
-    let parameter = &sieve_parameters[idx - 1];
-    let next_parameter = &sieve_parameters[idx];
+    let parameter = &SIEVE_PARAMETERS[idx - 1];
+    let next_parameter = &SIEVE_PARAMETERS[idx];
     let dist = next_parameter.bits - parameter.bits;
     let dist_low = bits - parameter.bits;
     let dist_high = next_parameter.bits - bits;

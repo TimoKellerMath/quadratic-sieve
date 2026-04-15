@@ -23,16 +23,12 @@ pub trait RelationOperationData {
 
 impl RelationOperationData for Relations {
     fn new(factorbase_size: usize) -> Relations {
-        let mut relation_data = Relations {
-            relations: Vec::<FixedBitSet>::with_capacity(factorbase_size),
-            indices: Vec::<FixedBitSet>::with_capacity(factorbase_size),
-            pivot: vec![0_usize; factorbase_size],
-            xsys: Vec::<(Integer, Integer)>::with_capacity(factorbase_size),
-        };
-        for (i, entry) in relation_data.pivot.iter_mut().enumerate() {
-            *entry = i;
+        Relations {
+            relations: Vec::with_capacity(factorbase_size),
+            indices: Vec::with_capacity(factorbase_size),
+            pivot: (0..factorbase_size).collect(),
+            xsys: Vec::with_capacity(factorbase_size),
         }
-        relation_data
     }
 
     #[inline]
@@ -56,8 +52,8 @@ impl RelationOperationData for Relations {
     // do Gaussian eliminations in bit vectors relations
     // modify the indices of the (x_i,y_i) accordingly
     fn gaussian_elimination(&mut self) -> Option<FixedBitSet> {
-        assert!(self.relations.len() >= 1); // this helps the compiler to optimize away bounds checks
-        let last_relation: &mut FixedBitSet = &mut self.relations.last().unwrap().clone();
+        assert!(!self.relations.is_empty()); // this helps the compiler to optimize away bounds checks
+        let mut last_relation = self.relations.last().unwrap().clone();
         // eliminate all 1's in the last relation by adding previous relations
         for (i, row) in self.relations.iter().enumerate() {
             // only eliminate with previous relations
@@ -65,7 +61,7 @@ impl RelationOperationData for Relations {
                 break;
             }
             if last_relation[self.pivot[i]] {
-                *last_relation ^= row;
+                last_relation ^= row;
                 // change indices accordingly
                 let index = self.indices[i].clone();
                 if let Some(last_index) = self.indices.last_mut() {
@@ -101,17 +97,15 @@ impl RelationOperationData for Relations {
         let mut x = Integer::from(1);
         let mut y = Integer::from(1);
         let mut v = Integer::from(1);
-        for j in 0..self.factorbase_size() {
-            if relation[j] {
-                let u = &self.xsys[j].0;
-                let v1 = &self.xsys[j].1;
-                x *= u;
-                x %= n;
-                let d = v1.gcd_ref(&v).complete();
-                v = v.div_exact(&d) * v1.div_exact_ref(&d).complete();
-                y *= d;
-                y %= n;
-            }
+        for j in relation.ones() {
+            let u = &self.xsys[j].0;
+            let v1 = &self.xsys[j].1;
+            x *= u;
+            x %= n;
+            let d = v1.gcd_ref(&v).complete();
+            v = v.div_exact(&d) * v1.div_exact_ref(&d).complete();
+            y *= d;
+            y %= n;
         }
         //    println!("x = {x}, v = {v}");
         debug_assert!(v.is_perfect_square());
