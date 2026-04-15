@@ -1,6 +1,5 @@
 use rug::Integer;
 use crate::number_theory::square_root_mod_p;
-use crate::constants::SCALE_LOGS;
 
 // compute factor base for n with size size
 pub fn make_factorbase(n: &Integer, size: usize) -> Vec<u32> {
@@ -19,14 +18,14 @@ pub fn make_factorbase(n: &Integer, size: usize) -> Vec<u32> {
     factorbase
 }
 
-// compute log(scale * p) for p in the factor base
-pub fn compute_logs(factorbase: &[u32]) -> Vec<u32> {
-    std::iter::once(0) // log_2|-1|
+// compute rounded log_2(p) as u8 for p in the factor base
+pub fn compute_logs(factorbase: &[u32]) -> Vec<u8> {
+    std::iter::once(0u8) // log_2|-1|
         .chain(
             factorbase
                 .iter()
                 .skip(1)
-                .map(|&p| ((p as f32).log2() * SCALE_LOGS as f32).round() as u32),
+                .map(|&p| (p as f32).log2().round() as u8),
         )
         .collect()
 }

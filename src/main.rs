@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
-use rug::{Float, Integer};
+use rug::Integer;
 
 use fixedbitset::FixedBitSet;
 
@@ -12,7 +12,6 @@ use rustc_hash::FxHashMap;
 pub mod number_theory;
 use crate::number_theory::*;
 pub mod constants;
-use crate::constants::*;
 pub mod factorbase;
 use crate::factorbase::*;
 pub mod polynomial_generator;
@@ -23,6 +22,9 @@ use crate::relations::*;
 pub mod multiplier;
 use crate::multiplier::*;
 pub mod debug_print;
+pub mod format_color;
+#[allow(unused_imports)]
+use crate::format_color::format_color;
 
 fn quadratic_sieve_multithreaded(
     n: &Integer,
@@ -57,7 +59,7 @@ fn quadratic_sieve_multithreaded(
     );
     let logs = Arc::new(compute_logs(&factorbase));
     let factorbase = Arc::new(factorbase.clone());
-    let kn_float = kn.to_f64();
+    let kn_bits = kn.significant_bits();
     let n = Arc::new(n);
     let kn = Arc::new(kn.clone());
     let found = Arc::new(AtomicBool::new(false));
@@ -128,7 +130,7 @@ fn quadratic_sieve_multithreaded(
             // producer threads: produce (partial) relations
             let sender1 = sender.clone();
             s.spawn(move |_| {
-                let mut logs_for_polynomial = vec![0; 2 * sieve_interval_length];
+                let mut logs_for_polynomial = vec![0u8; 2 * sieve_interval_length];
 
                 'outer_loop: loop {
                     if found.load(Ordering::Relaxed) {
@@ -143,19 +145,15 @@ fn quadratic_sieve_multithreaded(
                         &logs,
                         &mut logs_for_polynomial,
                     );
-                    // threshold = log_2(kn/a) * SCALE_LOGS - log of largest prime - sum of small logs
-                    // note: kn/a \approx sieve_interval_length * sqrt(kn)
-                    let threshold: u32 = (((Float::with_val(PREC, kn_float)
-                        / Float::with_val(PREC, &polynomial.a))
-                        .log2()
-                        * SCALE_LOGS)
-                        .to_u32_saturating()
-                        .unwrap()
-                        - logs.last().unwrap()
-                        - sum_small_logs) as u32;
+                    // threshold = log_2(kn/a) - log of largest prime - sum of small logs
+                    let log2_kn_over_a = kn_bits.saturating_sub(polynomial.a.significant_bits());
+                    let threshold: u8 = log2_kn_over_a
+                        .saturating_sub(*logs.last().unwrap() as u32)
+                        .saturating_sub(sum_small_logs)
+                        .min(u8::MAX as u32) as u8;
                     for (i, &log) in logs_for_polynomial.iter().enumerate() {
                         let x = (i as i32) - (sieve_interval_length as i32);
-                        if log as u32 >= threshold {
+                        if log >= threshold {
                             // trial divisions — evaluate polynomial using Horner's scheme
                             let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
                             // if Q(x) = v factored over factor base:

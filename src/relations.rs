@@ -1,4 +1,4 @@
-use crate::{number_theory::factor_out_power_of_2, polynomial_generator::Polynomial};
+use crate::{constants::NUM_SKIP_PRIMES, number_theory::factor_out_power_of_2, polynomial_generator::Polynomial};
 use fixedbitset::FixedBitSet;
 use itertools::izip;
 use rug::{Complete, Integer};
@@ -193,8 +193,8 @@ pub fn sieve_over_factorbase(
     sieve_interval_length: usize,
     factorbase: &[u32],
     roots: &[Option<(u32, u32)>],
-    logs: &[u32],
-    logs_for_polynomial: &mut [u32],
+    logs: &[u8],
+    logs_for_polynomial: &mut [u8],
     //polynomial: &Polynomial,
     //n: &Integer,
 ) -> u32 {
@@ -202,7 +202,6 @@ pub fn sieve_over_factorbase(
     logs_for_polynomial.fill(0);
 
     // skip small primes and subtract the sum of their logs from target
-    const NUM_SKIP_PRIMES: usize = 6;
     debug_assert!(NUM_SKIP_PRIMES >= 1); // we must skip -1
     debug_assert_eq!(factorbase.len(), roots.len());
     debug_assert_eq!(factorbase.len(), logs.len());
@@ -236,7 +235,7 @@ pub fn sieve_over_factorbase(
                 .skip(index1)
                 .step_by(p as usize)
             {
-                *value += log;
+                *value = value.saturating_add(log);
             }
             /*for i in (index1..logs_for_polynomial.len()).step_by(p as usize) {
                 let x = -(sieve_interval_length as i64) + (i as i64);
@@ -264,12 +263,12 @@ pub fn sieve_over_factorbase(
                 .skip(index2)
                 .step_by(p as usize)
             {
-                *value += log;
+                *value = value.saturating_add(log);
             }
         }
     }
     
-    logs[..NUM_SKIP_PRIMES].iter().sum::<u32>()
+    logs[..NUM_SKIP_PRIMES].iter().map(|&l| l as u32).sum::<u32>()
 }
 
 /// Blocked (segmented) version of the sieve which reuses `logs_for_polynomial`
@@ -285,8 +284,8 @@ pub fn sieve_over_factorbase_blocked(
     sieve_interval_length: usize,
     factorbase: &[u32],
     roots: &[Option<(u32, u32)>],
-    logs: &[u32],
-    logs_for_polynomial: &mut [u32],
+    logs: &[u8],
+    logs_for_polynomial: &mut [u8],
     block_size: usize,
 ) -> u32 {
     debug_assert_eq!(factorbase.len(), roots.len());
@@ -296,7 +295,6 @@ pub fn sieve_over_factorbase_blocked(
     // reset buffer (wiederverwenden statt neu alloziieren)
     logs_for_polynomial.fill(0);
 
-    const NUM_SKIP_PRIMES: usize = 6;
     debug_assert!(NUM_SKIP_PRIMES >= 1);
 
     // trivial case: if block_size >= total_len, fall back to non‑blocked style (but still reusing buffer)
@@ -315,7 +313,7 @@ pub fn sieve_over_factorbase_blocked(
                 let step = p as usize;
                 let mut i = index1;
                 while i < total_len {
-                    logs_for_polynomial[i] += log;
+                    logs_for_polynomial[i] = logs_for_polynomial[i].saturating_add(log);
                     i += step;
                 }
                 if root2 != root1 {
@@ -326,7 +324,7 @@ pub fn sieve_over_factorbase_blocked(
                     };
                     let mut i = index2;
                     while i < total_len {
-                        logs_for_polynomial[i] += log;
+                        logs_for_polynomial[i] = logs_for_polynomial[i].saturating_add(log);
                         i += step;
                     }
                 }
@@ -352,7 +350,7 @@ pub fn sieve_over_factorbase_blocked(
                     let offset = (((diff % p as isize) + p as isize) % p as isize) as usize;
                     let mut i = block_start + offset;
                     while i < block_end {
-                        logs_for_polynomial[i] += log;
+                        logs_for_polynomial[i] = logs_for_polynomial[i].saturating_add(log);
                         i += p_usize;
                     }
 
@@ -366,7 +364,7 @@ pub fn sieve_over_factorbase_blocked(
                         let offset2 = (((diff2 % p as isize) + p as isize) % p as isize) as usize;
                         let mut i2 = block_start + offset2;
                         while i2 < block_end {
-                            logs_for_polynomial[i2] += log;
+                            logs_for_polynomial[i2] = logs_for_polynomial[i2].saturating_add(log);
                             i2 += p_usize;
                         }
                     }
@@ -376,7 +374,7 @@ pub fn sieve_over_factorbase_blocked(
         }
     }
 
-    logs[..NUM_SKIP_PRIMES].iter().sum::<u32>()
+    logs[..NUM_SKIP_PRIMES].iter().map(|&l| l as u32).sum::<u32>()
 }
 
 // compute (u,y) with u^2 = v (n)

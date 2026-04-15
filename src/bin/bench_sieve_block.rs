@@ -59,18 +59,18 @@ fn main() {
         roots.push(Some((r1, r2)));
     }
 
-    // logs: simple scaled ln(p)
-    let mut logs: Vec<u32> = Vec::with_capacity(factorbase.len());
+    // logs: rounded log2(p) as u8
+    let mut logs: Vec<u8> = Vec::with_capacity(factorbase.len());
     logs.push(0); // -1
     logs.push(0); // 2
     for &p in &primes {
-        let v = ((p as f64).ln() * 1000.0) as u32;
+        let v = (p as f32).log2().round() as u8;
         logs.push(v.max(1));
     }
 
     // Prepare the reusable buffer
     let total_len = 2 * sieve_interval_length;
-    let mut buffer = vec![0u32; total_len];
+    let mut buffer = vec![0u8; total_len];
 
     // block sizes to test
     let block_sizes = vec![1024usize, 4096, 16384, 32768, 65536, 2 * 65536, 3 * 65536, 4 * 65536];
