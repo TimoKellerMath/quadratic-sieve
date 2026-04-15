@@ -126,10 +126,12 @@ impl RelationOperationData for Relations {
     }
 }
 
-// try to factor y over factorbase
+// try to factor y = Q(x) over factorbase, using resieve: only divide by p if x ≡ root (mod p)
 pub fn factor_over_factorbase(
+    x: i32,
     y: &Integer,
     factorbase: &[u32],
+    roots: &[Option<(u32, u32)>],
     k: u32,
     large_prime_multiplier: u32,
 ) -> Option<(FixedBitSet, u32)> {
@@ -150,12 +152,8 @@ pub fn factor_over_factorbase(
         relation.set(1, true);
     }
 
-    // rug trial division (u32 fast path, no per-prime Integer allocation)
-    let mut i = 2;
-    while i < factorbase.len() {
-        if y_.significant_bits() <= 63 {
-            break;
-        }
+    // indices 2..NUM_SKIP_PRIMES: sieve skips these, so trial-divide directly
+    for i in 2..NUM_SKIP_PRIMES.min(factorbase.len()) {
         let p = factorbase[i];
         let mut exp = 0u32;
         while y_.is_divisible_u(p) {
@@ -168,6 +166,37 @@ pub fn factor_over_factorbase(
         if y_ == 1 {
             return Some((relation, 1));
         }
+    }
+
+    let x64 = x as i64;
+    // indices NUM_SKIP_PRIMES..: sieved primes. p | Q(x) iff x ≡ root1 or root2 (mod p),
+    // so skip the big-int divisibility test for primes that don't hit x.
+    let mut i = NUM_SKIP_PRIMES;
+    while i < factorbase.len() {
+        if y_.significant_bits() <= 63 {
+            break;
+        }
+        let p = factorbase[i];
+        let divides = match roots[i] {
+            Some((r1, r2)) => {
+                let xmp = x64.rem_euclid(p as i64) as u32;
+                xmp == r1 || xmp == r2
+            }
+            None => y_.is_divisible_u(p), // p | a: resieve info unavailable
+        };
+        if divides {
+            let mut exp = 0u32;
+            while y_.is_divisible_u(p) {
+                y_.div_exact_u_mut(p);
+                exp += 1;
+            }
+            if exp & 1 == 1 {
+                relation.set(i, true);
+            }
+            if y_ == 1 {
+                return Some((relation, 1));
+            }
+        }
         i += 1;
     }
 
@@ -178,16 +207,25 @@ pub fn factor_over_factorbase(
         if p * p > y_u64 {
             break;
         }
-        let mut exp = 0u32;
-        while y_u64 % p == 0 {
-            y_u64 /= p;
-            exp += 1;
-        }
-        if exp & 1 == 1 {
-            relation.set(i, true);
-        }
-        if y_u64 == 1 {
-            return Some((relation, 1));
+        let divides = match roots[i] {
+            Some((r1, r2)) => {
+                let xmp = x64.rem_euclid(p as i64) as u64;
+                xmp == r1 as u64 || xmp == r2 as u64
+            }
+            None => y_u64 % p == 0,
+        };
+        if divides {
+            let mut exp = 0u32;
+            while y_u64 % p == 0 {
+                y_u64 /= p;
+                exp += 1;
+            }
+            if exp & 1 == 1 {
+                relation.set(i, true);
+            }
+            if y_u64 == 1 {
+                return Some((relation, 1));
+            }
         }
         i += 1;
     }

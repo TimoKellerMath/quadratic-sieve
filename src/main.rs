@@ -159,9 +159,14 @@ fn quadratic_sieve_multithreaded(
                             // trial divisions — evaluate polynomial using Horner's scheme
                             let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
                             // if Q(x) = v factored over factor base:
-                            if let Some((relation, big_prime)) =
-                                factor_over_factorbase(&v, &factorbase, k, large_prime_multiplier)
-                            {
+                            if let Some((relation, big_prime)) = factor_over_factorbase(
+                                x,
+                                &v,
+                                &factorbase,
+                                roots,
+                                k,
+                                large_prime_multiplier,
+                            ) {
                                 if sender1
                                     .send((u, v, relation, big_prime, index_thread))
                                     .is_err() {
