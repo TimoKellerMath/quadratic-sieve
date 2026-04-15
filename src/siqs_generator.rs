@@ -1,7 +1,7 @@
 use crate::constants::PREC;
 use crate::format_color::*;
 use crate::{debug_print,debug_println};
-use crate::number_theory::lift_square_root_mod_q2;
+use crate::number_theory::{lift_square_root_mod_q2, modular_inverse_u32};
 use crate::polynomial_generator::Polynomial;
 use core::num::NonZero;
 use std::num::NonZeroU32;
@@ -241,11 +241,10 @@ impl<'a> SIQSPolynomialData<'a> {
 
         // compute a^-1 (mod p) if it exists
         self.q_inv_mod_ps.clear();
-        for p in factorbase {
-            if *p > 2
-                && let Some(q_inv_mod_p) = self.a.invert_ref(&Integer::from(*p))
+        for &p in factorbase {
+            if p > 2
+                && let Some(ainvp) = modular_inverse_u32(self.a.mod_u(p), p)
             {
-                let ainvp = q_inv_mod_p.complete().to_u32().unwrap();
                 self.q_inv_mod_ps
                     .push(Some(unsafe { NonZero::<u32>::new_unchecked(ainvp) }));
             } else {
@@ -261,7 +260,8 @@ impl<'a> SIQSPolynomialData<'a> {
             let bainv2ips = self.bainv2ips.last_mut().unwrap();
             for (&ainvp, &p) in izip!(&self.q_inv_mod_ps, factorbase) {
                 if let Some(ainvp) = ainvp {
-                    let bainv2jp = (b * (ainvp.get() * 2_u32)).complete().mod_u(p as u32) as u32;
+                    let bainv2jp =
+                        (b.mod_u(p) as u64 * (ainvp.get() as u64 * 2) % p as u64) as u32;
                     bainv2ips.push(Some(bainv2jp));
                 } else {
                     bainv2ips.push(None);

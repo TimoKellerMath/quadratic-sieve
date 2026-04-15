@@ -75,6 +75,34 @@ pub fn square_mod_p(a: &Integer, p: &Integer) -> Integer {
     a.square_ref().complete() % p
 }
 
+// modular inverse of a mod p for prime p (or None if p | a); a must be < 2^31
+#[inline]
+pub fn modular_inverse_u32(a: u32, p: u32) -> Option<u32> {
+    if a == 0 {
+        return None;
+    }
+    let mut t: i64 = 0;
+    let mut newt: i64 = 1;
+    let mut r: i64 = p as i64;
+    let mut newr: i64 = a as i64;
+    while newr != 0 {
+        let q = r / newr;
+        let tmp = t - q * newt;
+        t = newt;
+        newt = tmp;
+        let tmp = r - q * newr;
+        r = newr;
+        newr = tmp;
+    }
+    if r != 1 {
+        return None;
+    }
+    if t < 0 {
+        t += p as i64;
+    }
+    Some(t as u32)
+}
+
 // compute (a_,k) with a = a_ 2^k, a_ odd (or (0,0) if a == 0)
 pub fn factor_out_power_of_2(a: &Integer) -> (Integer, u32) {
     let k = match a.find_one(0) {
