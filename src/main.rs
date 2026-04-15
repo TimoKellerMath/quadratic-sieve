@@ -101,7 +101,7 @@ fn quadratic_sieve_multithreaded(
                     } else {
                         debug_print!("{}", format_color("+", index_thread));
                     }
-                    relations.add_relation(&relation, &(u, v));
+                    relations.add_relation(relation, (u, v));
                     // Gaussian elimination
                     if let Some(relation) = relations.gaussian_elimination() {
                         debug_print!("{}", format_color("!", index_thread));

@@ -13,7 +13,7 @@ pub struct Relations {
 
 pub trait RelationOperationData {
     fn new(factorbase_size: usize) -> Self;
-    fn add_relation(&mut self, relation: &FixedBitSet, xy: &(Integer, Integer));
+    fn add_relation(&mut self, relation: FixedBitSet, xy: (Integer, Integer));
     fn gaussian_elimination(&mut self) -> Option<FixedBitSet>;
     fn find_factor(&self, relation: &FixedBitSet, n: &Integer) -> Option<Integer>;
     fn factorbase_size(&self) -> usize;
@@ -32,60 +32,48 @@ impl RelationOperationData for Relations {
     }
 
     #[inline]
-    fn add_relation(&mut self, relation: &FixedBitSet, xy: &(Integer, Integer)) {
-        self.relations.push(relation.clone());
+    fn add_relation(&mut self, relation: FixedBitSet, xy: (Integer, Integer)) {
+        self.relations.push(relation);
         let mut new_index = FixedBitSet::with_capacity(self.factorbase_size());
         new_index.set(self.relations.len() - 1, true);
         self.indices.push(new_index);
         // progress report every 10% of the factorbase size
-        if self
-            .relations
-            .len()
-            .is_multiple_of(self.factorbase_size() / 10)
-        {
-            print!("({})", self.relations.len() / (self.factorbase_size() / 10));
+        let step = (self.factorbase_size() / 10).max(1);
+        if self.relations.len().is_multiple_of(step) {
+            print!("({})", self.relations.len() / step);
             io::stdout().flush().unwrap();
         }
-        self.xsys.push(xy.clone());
+        self.xsys.push(xy);
     }
 
     // do Gaussian eliminations in bit vectors relations
     // modify the indices of the (x_i,y_i) accordingly
     fn gaussian_elimination(&mut self) -> Option<FixedBitSet> {
-        assert!(!self.relations.is_empty()); // this helps the compiler to optimize away bounds checks
-        let mut last_relation = self.relations.last().unwrap().clone();
-        // eliminate all 1's in the last relation by adding previous relations
-        for (i, row) in self.relations.iter().enumerate() {
-            // only eliminate with previous relations
-            if i == self.relations.len() - 1 {
-                break;
-            }
-            if last_relation[self.pivot[i]] {
-                last_relation ^= row;
-                // change indices accordingly
-                let index = self.indices[i].clone();
-                if let Some(last_index) = self.indices.last_mut() {
-                    *last_index ^= &index;
+        assert!(!self.relations.is_empty()); // helps the compiler elide bounds checks
+        let last_idx = self.relations.len() - 1;
+        // eliminate in place: borrow last row mutably and earlier rows immutably
+        {
+            let (earlier_rels, last_rel_slice) = self.relations.split_at_mut(last_idx);
+            let last_rel = &mut last_rel_slice[0];
+            let (earlier_idxs, last_idx_slice) = self.indices.split_at_mut(last_idx);
+            let last_index = &mut last_idx_slice[0];
+            for i in 0..last_idx {
+                if last_rel[self.pivot[i]] {
+                    *last_rel ^= &earlier_rels[i];
+                    *last_index ^= &earlier_idxs[i];
                 }
             }
         }
-        // find pivot[k] with last relation has an 1 at k
-        for i in self.relations.len() - 1..self.pivot.len() {
-            let j = self.pivot[i];
-            if last_relation[j] {
-                let j_tmp = self.pivot[self.relations.len() - 1];
-                self.pivot[self.relations.len() - 1] = j;
-                self.pivot[i] = j_tmp;
-                if let Some(relation) = self.relations.last_mut() {
-                    *relation = last_relation.clone();
-                }
+        // find pivot[k] with last relation == 1 at k
+        let last_rel = &self.relations[last_idx];
+        for i in last_idx..self.pivot.len() {
+            if last_rel[self.pivot[i]] {
+                self.pivot.swap(last_idx, i);
                 return None;
             }
         }
-        // if it does not exist, then we have found a non-trivial linear dependency
-        // remove the 0-row in relations
+        // non-trivial dependency: drop the 0-row and return its index set
         self.relations.pop();
-        // and return the found relation
         Some(self.indices.pop().unwrap())
     }
 
@@ -242,63 +230,26 @@ pub fn sieve_over_factorbase(
     debug_assert_eq!(factorbase.len(), logs.len());
     //println!("roots = {:?}", &roots[..5]);
     // sieve for all primes p_i with i >= NUM_SKIP_PRIMES in factor base
+    let total_len = logs_for_polynomial.len();
     for (&p, &roots, &log) in izip!(factorbase, roots, logs).skip(NUM_SKIP_PRIMES) {
         if let Some((root1, root2)) = roots {
-            //debug_assert!(root1.abs() < p && root2.abs() < p);
-            /*if p <= 100 {
-                println!("p = {p}, roots = ({root1},{root2}), polynomial = {polynomial:?}");
-            }*/
-            /*debug_assert!(
-                evaluate_polynomial_at(root1, polynomial, n)
-                    .1
-                    .is_divisible_u(p as u32)
-            );
-            debug_assert!(
-                evaluate_polynomial_at(root2, polynomial, n)
-                    .1
-                    .is_divisible_u(p as u32)
-            );*/
-            let lower_bound: i32 = -(((sieve_interval_length as i64) % (p as i64)) as i32);
-            let index1 = if root1 as i32 >= lower_bound {
-                (root1 as i32 - lower_bound) as usize
-            } else {
-                (p as i32 + root1 as i32 - lower_bound) as usize
-            };
-            // sieve with first root
-            for value in logs_for_polynomial
-                .iter_mut()
-                .skip(index1)
-                .step_by(p as usize)
-            {
-                *value += log;
+            let p_us = p as usize;
+            // smallest i >= 0 with (i - M) ≡ root (mod p), i.e. i ≡ root + M (mod p)
+            let index1 = (root1 as usize + sieve_interval_length) % p_us;
+            let mut j = index1;
+            while j < total_len {
+                logs_for_polynomial[j] += log;
+                j += p_us;
             }
-            /*for i in (index1..logs_for_polynomial.len()).step_by(p as usize) {
-                let x = -(sieve_interval_length as i64) + (i as i64);
-                debug_assert!(evaluate_polynomial_at(x, polynomial, n).1.is_divisible_u(p as u32));
-            }*/
-            // double roots indicate linear polynomial (mod p) => only divisible once
+            // double root => p | a, Q is linear mod p, divisible only once
             if root2 == root1 {
-                /*
-                // NB: This should fail!
-                for i in (index1..logs_for_polynomial.len()).step_by(p as usize) {
-                    let x = -(sieve_interval_length as i64) + (i as i64);
-                    debug_assert!(evaluate_polynomial_at(x, polynomial, n).1.is_divisible(&Integer::from(p).square_ref().complete()));
-                }*/
                 continue;
             }
-            let index2 = if root2 as i32 >= lower_bound {
-                (root2 as i32 - lower_bound) as usize
-            } else {
-                (p as i32 + root2 as i32 - lower_bound) as usize
-            };
-            // double root => sieve twice!
-            // sieve with second root
-            for value in logs_for_polynomial
-                .iter_mut()
-                .skip(index2)
-                .step_by(p as usize)
-            {
-                *value += log;
+            let index2 = (root2 as usize + sieve_interval_length) % p_us;
+            let mut j = index2;
+            while j < total_len {
+                logs_for_polynomial[j] += log;
+                j += p_us;
             }
         }
     }
