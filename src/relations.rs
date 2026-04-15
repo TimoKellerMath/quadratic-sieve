@@ -325,74 +325,71 @@ pub fn sieve_over_factorbase_blocked(
     let use_blocking = block_size > 0 && block_size < total_len;
 
     if !use_blocking {
-        // simple fallback: do global stepping (similar to original, but reusing buffer)
+        // fallback: single pass over the whole buffer, reusing buffer
         for (&p, &roots_opt, &log) in izip!(factorbase, roots, logs).skip(NUM_SKIP_PRIMES) {
             if let Some((root1, root2)) = roots_opt {
-                let lower_bound: i32 = -(((sieve_interval_length as i64) % (p as i64)) as i32);
-                let index1 = if root1 as i32 >= lower_bound {
-                    (root1 as i32 - lower_bound) as usize
-                } else {
-                    (p as i32 + root1 as i32 - lower_bound) as usize
-                };
-                let step = p as usize;
-                let mut i = index1;
-                while i < total_len {
-                    logs_for_polynomial[i] += log;
-                    i += step;
+                let p_us = p as usize;
+                let index1 = (root1 as usize + sieve_interval_length) % p_us;
+                let mut j = index1;
+                while j < total_len {
+                    logs_for_polynomial[j] += log;
+                    j += p_us;
                 }
-                if root2 != root1 {
-                    let index2 = if root2 as i32 >= lower_bound {
-                        (root2 as i32 - lower_bound) as usize
-                    } else {
-                        (p as i32 + root2 as i32 - lower_bound) as usize
-                    };
-                    let mut i = index2;
-                    while i < total_len {
-                        logs_for_polynomial[i] += log;
-                        i += step;
-                    }
+                if root2 == root1 {
+                    continue;
+                }
+                let index2 = (root2 as usize + sieve_interval_length) % p_us;
+                let mut j = index2;
+                while j < total_len {
+                    logs_for_polynomial[j] += log;
+                    j += p_us;
                 }
             }
         }
     } else {
-        // blocked processing
+        // blocked processing: carry the next hit position across blocks per prime
+        let n_primes = factorbase.len();
+        let mut next_pos: Vec<usize> = Vec::with_capacity(2 * n_primes);
+        for (&p, &roots_opt) in izip!(factorbase, roots).skip(NUM_SKIP_PRIMES) {
+            if let Some((root1, root2)) = roots_opt {
+                let p_us = p as usize;
+                next_pos.push((root1 as usize + sieve_interval_length) % p_us);
+                if root2 == root1 {
+                    next_pos.push(usize::MAX); // marker: skip
+                } else {
+                    next_pos.push((root2 as usize + sieve_interval_length) % p_us);
+                }
+            } else {
+                next_pos.push(usize::MAX);
+                next_pos.push(usize::MAX);
+            }
+        }
+
         let mut block_start = 0usize;
         while block_start < total_len {
             let block_end = (block_start + block_size).min(total_len);
-            for (&p, &roots_opt, &log) in izip!(factorbase, roots, logs).skip(NUM_SKIP_PRIMES) {
-                if let Some((root1, root2)) = roots_opt {
-                    let lower_bound: i32 = -(((sieve_interval_length as i64) % (p as i64)) as i32);
-                    let index1 = if root1 as i32 >= lower_bound {
-                        (root1 as i32 - lower_bound) as usize
-                    } else {
-                        (p as i32 + root1 as i32 - lower_bound) as usize
-                    };
-                    let p_usize = p as usize;
-
-                    // compute smallest i >= block_start with i ≡ index1 (mod p)
-                    let diff = index1 as isize - block_start as isize;
-                    let offset = (((diff % p as isize) + p as isize) % p as isize) as usize;
-                    let mut i = block_start + offset;
-                    while i < block_end {
-                        logs_for_polynomial[i] += log;
-                        i += p_usize;
+            let mut idx = 0usize;
+            for (&p, &log) in izip!(factorbase, logs).skip(NUM_SKIP_PRIMES) {
+                let p_us = p as usize;
+                let pos1 = next_pos[idx];
+                if pos1 != usize::MAX {
+                    let mut j = pos1;
+                    while j < block_end {
+                        logs_for_polynomial[j] += log;
+                        j += p_us;
                     }
-
-                    if root2 != root1 {
-                        let index2 = if root2 as i32 >= lower_bound {
-                            (root2 as i32 - lower_bound) as usize
-                        } else {
-                            (p as i32 + root2 as i32 - lower_bound) as usize
-                        };
-                        let diff2 = index2 as isize - block_start as isize;
-                        let offset2 = (((diff2 % p as isize) + p as isize) % p as isize) as usize;
-                        let mut i2 = block_start + offset2;
-                        while i2 < block_end {
-                            logs_for_polynomial[i2] += log;
-                            i2 += p_usize;
-                        }
-                    }
+                    next_pos[idx] = j;
                 }
+                let pos2 = next_pos[idx + 1];
+                if pos2 != usize::MAX {
+                    let mut j = pos2;
+                    while j < block_end {
+                        logs_for_polynomial[j] += log;
+                        j += p_us;
+                    }
+                    next_pos[idx + 1] = j;
+                }
+                idx += 2;
             }
             block_start = block_end;
         }
