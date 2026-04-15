@@ -149,42 +149,77 @@ pub fn factor_over_factorbase(
         return None;
     }
     let mut y_ = y.clone();
-    // initialized with false
     let mut relation = FixedBitSet::with_capacity(factorbase.len());
-    for (i, p) in factorbase.iter().enumerate() {
-        if i == 0 {
-            // -1 in factorbase
-            if y_.is_negative() {
-                relation.set(i, true);
-                y_ = -y_;
-            }
-            continue;
+    // -1 in factorbase
+    if y_.is_negative() {
+        relation.set(0, true);
+        y_ = -y_;
+    }
+    // 2 in factorbase
+    let exponent;
+    (y_, exponent) = factor_out_power_of_2(&y_);
+    if exponent % 2 == 1 {
+        relation.set(1, true);
+    }
+
+    // rug trial division (u32 fast path, no per-prime Integer allocation)
+    let mut i = 2;
+    while i < factorbase.len() {
+        if y_.significant_bits() <= 63 {
+            break;
         }
-        if i == 1 {
-            // 2 in factorbase
-            let exponent;
-            (y_, exponent) = factor_out_power_of_2(&y_);
-            if exponent % 2 == 1 {
-                relation.set(i, true);
-            }
-            continue;
+        let p = factorbase[i];
+        let mut exp = 0u32;
+        while y_.is_divisible_u(p) {
+            y_.div_exact_u_mut(p);
+            exp += 1;
         }
-        let exponent = y_.remove_factor_mut(&Integer::from(*p));
-        if exponent % 2 == 1 {
+        if exp & 1 == 1 {
             relation.set(i, true);
         }
         if y_ == 1 {
             return Some((relation, 1));
         }
+        i += 1;
     }
-    // often y is divisible by prime divisors of k. As we are only interested in modulo n, not kn, we can factor out all prime divisors of k
-    debug_assert!(y_.clone().gcd_u(k) == 1);
-    // is the remaining factor prime? (big prime variation)
-    let largest_prime = *factorbase.last().unwrap();
-    if y_ < largest_prime * large_prime_multiplier {
-        //if y_ < largest_prime * largest_prime { here we have to use y_.to_i64().unwrap()
-        //println!("remaining y_ = {y_} (small enough)");
-        return Some((relation, y_.to_u32().unwrap()));
+
+    // u64 fast path with sqrt early termination
+    let mut y_u64 = y_.to_u64().unwrap();
+    while i < factorbase.len() {
+        let p = factorbase[i] as u64;
+        if p * p > y_u64 {
+            break;
+        }
+        let mut exp = 0u32;
+        while y_u64 % p == 0 {
+            y_u64 /= p;
+            exp += 1;
+        }
+        if exp & 1 == 1 {
+            relation.set(i, true);
+        }
+        if y_u64 == 1 {
+            return Some((relation, 1));
+        }
+        i += 1;
+    }
+
+    // remainder y_u64 is 1 or prime
+    if y_u64 == 1 {
+        return Some((relation, 1));
+    }
+    // locate prime in factorbase[i..] via binary search
+    let largest_prime = *factorbase.last().unwrap() as u64;
+    if y_u64 <= largest_prime {
+        if let Ok(offset) = factorbase[i..].binary_search(&(y_u64 as u32)) {
+            relation.toggle(i + offset);
+            return Some((relation, 1));
+        }
+    }
+    debug_assert!(Integer::from(y_u64).gcd_u(k) == 1);
+    // big prime variation: small enough partial
+    if y_u64 < largest_prime * large_prime_multiplier as u64 {
+        return Some((relation, y_u64 as u32));
     }
     None
 }
@@ -235,7 +270,7 @@ pub fn sieve_over_factorbase(
                 .skip(index1)
                 .step_by(p as usize)
             {
-                *value = value.saturating_add(log);
+                *value += log;
             }
             /*for i in (index1..logs_for_polynomial.len()).step_by(p as usize) {
                 let x = -(sieve_interval_length as i64) + (i as i64);
@@ -263,7 +298,7 @@ pub fn sieve_over_factorbase(
                 .skip(index2)
                 .step_by(p as usize)
             {
-                *value = value.saturating_add(log);
+                *value += log;
             }
         }
     }
@@ -313,7 +348,7 @@ pub fn sieve_over_factorbase_blocked(
                 let step = p as usize;
                 let mut i = index1;
                 while i < total_len {
-                    logs_for_polynomial[i] = logs_for_polynomial[i].saturating_add(log);
+                    logs_for_polynomial[i] += log;
                     i += step;
                 }
                 if root2 != root1 {
@@ -324,7 +359,7 @@ pub fn sieve_over_factorbase_blocked(
                     };
                     let mut i = index2;
                     while i < total_len {
-                        logs_for_polynomial[i] = logs_for_polynomial[i].saturating_add(log);
+                        logs_for_polynomial[i] += log;
                         i += step;
                     }
                 }
@@ -350,7 +385,7 @@ pub fn sieve_over_factorbase_blocked(
                     let offset = (((diff % p as isize) + p as isize) % p as isize) as usize;
                     let mut i = block_start + offset;
                     while i < block_end {
-                        logs_for_polynomial[i] = logs_for_polynomial[i].saturating_add(log);
+                        logs_for_polynomial[i] += log;
                         i += p_usize;
                     }
 
@@ -364,7 +399,7 @@ pub fn sieve_over_factorbase_blocked(
                         let offset2 = (((diff2 % p as isize) + p as isize) % p as isize) as usize;
                         let mut i2 = block_start + offset2;
                         while i2 < block_end {
-                            logs_for_polynomial[i2] = logs_for_polynomial[i2].saturating_add(log);
+                            logs_for_polynomial[i2] += log;
                             i2 += p_usize;
                         }
                     }

@@ -138,12 +138,14 @@ fn quadratic_sieve_multithreaded(
                     }
                     let (polynomial, roots) = polynomial_generator.next_polynomial();
                     debug_print!("{}", format_color("?", index_thread));
+                    //const BLOCK_SIZE_FOR_RYZEN6850: usize = 2 * 65536;
                     let sum_small_logs = sieve_over_factorbase(
                         sieve_interval_length,
                         &factorbase,
                         roots,
                         &logs,
                         &mut logs_for_polynomial,
+                        //BLOCK_SIZE_FOR_RYZEN6850,
                     );
                     // threshold = log_2(kn/a) - log of largest prime - sum of small logs
                     let log2_kn_over_a = kn_bits.saturating_sub(polynomial.a.significant_bits());
