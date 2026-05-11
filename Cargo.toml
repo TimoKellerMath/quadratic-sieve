@@ -20,15 +20,13 @@ lto = false
 codegen-units = 16
 
 [dependencies]
-#number_theory = { path = "src/number_theory.rs" }
 rand = "0.8"
-num-traits = "0.2.19"
-#bit-vec = "0.8"
-fixedbitset = "0.5.7"
-colored_text = "0.3.0"
-itertools = "0.14.0"
-rustc-hash = "2.1.1"
-rayon = "1.11"
+num-traits = "0.2"
+fixedbitset = "0.5"
+colored_text = "0.3"
+itertools = "0.14"
+rustc-hash = "2.1"
+rayon = "1.12"
 
 [dependencies.gmp-mpfr-sys]
 version = "1.6"
