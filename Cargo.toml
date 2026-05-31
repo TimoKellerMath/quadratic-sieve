@@ -21,7 +21,6 @@ codegen-units = 16
 
 [dependencies]
 rand = "0.8"
-num-traits = "0.2"
 fixedbitset = "0.5"
 colored_text = "0.3"
 itertools = "0.14"

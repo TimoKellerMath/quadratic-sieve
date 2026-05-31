@@ -256,8 +256,9 @@ impl<'a> SIQSPolynomialData<'a> {
             if p > 2
                 && let Some(ainvp) = modular_inverse_u32(self.a.mod_u(p), p)
             {
-                self.q_inv_mod_ps
-                    .push(Some(unsafe { NonZero::<u32>::new_unchecked(ainvp) }));
+                self.q_inv_mod_ps.push(Some(
+                    NonZero::<u32>::new(ainvp).expect("modular inverse mod a prime is nonzero"),
+                ));
             } else {
                 self.q_inv_mod_ps.push(None);
             }

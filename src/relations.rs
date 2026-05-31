@@ -11,18 +11,8 @@ pub struct Relations {
     xsys: Vec<(Integer, Integer)>,
 }
 
-pub trait RelationOperationData {
-    fn new(factorbase_size: usize) -> Self;
-    fn add_relation(&mut self, relation: FixedBitSet, xy: (Integer, Integer));
-    fn gaussian_elimination(&mut self) -> Option<FixedBitSet>;
-    fn find_factor(&self, relation: &FixedBitSet, n: &Integer) -> Option<Integer>;
-    fn factorbase_size(&self) -> usize;
-    fn len(&self) -> usize;
-    fn drop_last_relation(&mut self);
-}
-
-impl RelationOperationData for Relations {
-    fn new(factorbase_size: usize) -> Relations {
+impl Relations {
+    pub fn new(factorbase_size: usize) -> Relations {
         Relations {
             relations: Vec::with_capacity(factorbase_size),
             indices: Vec::with_capacity(factorbase_size),
@@ -32,7 +22,7 @@ impl RelationOperationData for Relations {
     }
 
     #[inline]
-    fn add_relation(&mut self, relation: FixedBitSet, xy: (Integer, Integer)) {
+    pub fn add_relation(&mut self, relation: FixedBitSet, xy: (Integer, Integer)) {
         self.relations.push(relation);
         // relations.len() transiently reaches factorbase_size + 1: the rank can
         // grow up to factorbase_size, and the next relation is pushed (setting bit
@@ -53,7 +43,7 @@ impl RelationOperationData for Relations {
 
     // do Gaussian eliminations in bit vectors relations
     // modify the indices of the (x_i,y_i) accordingly
-    fn gaussian_elimination(&mut self) -> Option<FixedBitSet> {
+    pub fn gaussian_elimination(&mut self) -> Option<FixedBitSet> {
         assert!(!self.relations.is_empty()); // helps the compiler elide bounds checks
         let last_idx = self.relations.len() - 1;
         // eliminate in place: borrow last row mutably and earlier rows immutably
@@ -85,7 +75,7 @@ impl RelationOperationData for Relations {
     // given a FixedBitSettor of indices i such that y := prod_i y_i is a square,
     // construct x := prod_i x_i and compute gcd(x +- y, n)
     // and return it if it is != 1, n
-    fn find_factor(&self, relation: &FixedBitSet, n: &Integer) -> Option<Integer> {
+    pub fn find_factor(&self, relation: &FixedBitSet, n: &Integer) -> Option<Integer> {
         // corresponding rows in indices give combination of ys
         let mut x = Integer::from(1);
         let mut y = Integer::from(1);
@@ -116,17 +106,17 @@ impl RelationOperationData for Relations {
     }
 
     #[inline]
-    fn factorbase_size(&self) -> usize {
+    pub fn factorbase_size(&self) -> usize {
         self.pivot.len()
     }
 
     #[inline]
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.relations.len()
     }
 
     #[inline]
-    fn drop_last_relation(&mut self) {
+    pub fn drop_last_relation(&mut self) {
         self.xsys.pop();
     }
 }

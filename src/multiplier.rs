@@ -1,5 +1,4 @@
 use crate::number_theory::*;
-use num_traits::Zero;
 use rug::{Complete, Integer};
 
 pub fn compute_multiplier(n: &Integer) -> Result<u32, NumberTheoryError> {
@@ -27,7 +26,7 @@ pub fn compute_multiplier(n: &Integer) -> Result<u32, NumberTheoryError> {
         }
         for (i, k) in multipliers.iter().enumerate() {
             let kn_mod_p = (k * n_mod_p) % p;
-            if kn_mod_p.is_zero() {
+            if kn_mod_p == 0 {
                 scores[i] -= contribution_p;
             }
             if Integer::from(kn_mod_p).legendre(&Integer::from(p)) == 1 {
@@ -36,7 +35,7 @@ pub fn compute_multiplier(n: &Integer) -> Result<u32, NumberTheoryError> {
         }
     }
     //println!("scores = {scores:?}");
-    let mut min_score = 1000.0f64;
+    let mut min_score = f64::INFINITY;
     let mut index = 0;
     for (i, score) in scores.iter().enumerate() {
         if *score < min_score {
