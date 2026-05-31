@@ -1,7 +1,7 @@
-use crate::{constants::NUM_SKIP_PRIMES, number_theory::factor_out_power_of_2, polynomial_generator::Polynomial};
+use crate::{constants::NUM_SKIP_PRIMES, polynomial_generator::Polynomial};
 use fixedbitset::FixedBitSet;
 use itertools::izip;
-use rug::{Complete, Integer};
+use rug::{Assign, Complete, Integer};
 use std::io::{self, Write};
 
 pub struct Relations {
@@ -129,20 +129,24 @@ pub fn factor_over_factorbase(
     roots: &[Option<(u32, u32)>],
     k: u32,
     large_prime_multiplier: u32,
+    scratch: &mut Integer,
 ) -> Option<(FixedBitSet, u32)> {
     if y.is_zero() {
         return None;
     }
-    let mut y_ = y.clone();
+    // Reuse the caller-owned scratch integer instead of cloning y on every
+    // candidate; assign reuses scratch's existing allocation.
+    let y_ = scratch;
+    y_.assign(y);
     let mut relation = FixedBitSet::with_capacity(factorbase.len());
     // -1 in factorbase
     if y_.is_negative() {
         relation.set(0, true);
-        y_ = -y_;
+        y_.abs_mut();
     }
-    // 2 in factorbase
-    let exponent;
-    (y_, exponent) = factor_out_power_of_2(&y_);
+    // 2 in factorbase: divide out 2^exponent in place (y_ != 0 checked above)
+    let exponent = y_.find_one(0).unwrap();
+    *y_ >>= exponent;
     if exponent % 2 == 1 {
         relation.set(1, true);
     }
@@ -158,7 +162,7 @@ pub fn factor_over_factorbase(
         if exp & 1 == 1 {
             relation.set(i, true);
         }
-        if y_ == 1 {
+        if *y_ == 1 {
             return Some((relation, 1));
         }
     }
@@ -188,7 +192,7 @@ pub fn factor_over_factorbase(
             if exp & 1 == 1 {
                 relation.set(i, true);
             }
-            if y_ == 1 {
+            if *y_ == 1 {
                 return Some((relation, 1));
             }
         }
@@ -304,6 +308,9 @@ pub fn sieve_over_factorbase(
 /// - `sieve_interval_length`: half the window length (total_len = 2 * sieve_interval_length)
 /// - `factorbase`, `roots`, `logs`: same layout as existing code
 /// - `logs_for_polynomial`: caller‑owned buffer with length == 2 * sieve_interval_length
+/// - `next_pos`: caller‑owned scratch reused across calls (its contents are
+///   overwritten each call); avoids reallocating ~2*factorbase.len() usizes per
+///   polynomial. Only used on the blocked path.
 /// - `block_size`: block size in elements (choose e.g. 8k .. 64k)
 ///
 /// Returns sum of small logs (same as other variants).
@@ -313,6 +320,7 @@ pub fn sieve_over_factorbase_blocked(
     roots: &[Option<(u32, u32)>],
     logs: &[u8],
     logs_for_polynomial: &mut [u8],
+    next_pos: &mut Vec<usize>,
     block_size: usize,
 ) -> u32 {
     debug_assert_eq!(factorbase.len(), roots.len());
@@ -351,9 +359,10 @@ pub fn sieve_over_factorbase_blocked(
             }
         }
     } else {
-        // blocked processing: carry the next hit position across blocks per prime
-        let n_primes = factorbase.len();
-        let mut next_pos: Vec<usize> = Vec::with_capacity(2 * n_primes);
+        // blocked processing: carry the next hit position across blocks per prime.
+        // next_pos is caller-owned scratch; clear and refill it (reusing its
+        // allocation) rather than allocating a fresh Vec every polynomial.
+        next_pos.clear();
         for (&p, &roots_opt) in izip!(factorbase, roots).skip(NUM_SKIP_PRIMES) {
             if let Some((root1, root2)) = roots_opt {
                 let p_us = p as usize;
@@ -410,16 +419,16 @@ pub fn sieve_over_factorbase_blocked(
 // y = ((a x + b) + b) * x + c = ax^2 + 2bx + c = Q(x) = ((qx + b)^2 - n)/q
 // u = (qx + b) * q^-1 (n)
 pub fn evaluate_polynomial_at(x: i32, polynomial: &Polynomial, n: &Integer) -> (Integer, Integer) {
-    let mut y = (&polynomial.a * x + &polynomial.b).complete();
+    let mut y = (polynomial.a * x + &polynomial.b).complete();
     // u = qx + b
     let mut u = y.clone();
     y += &polynomial.b;
     y *= x;
     y += &polynomial.c; // y = ux + c = qx^2 + 2bx + c = qx^2 + 2bx + (b^2-n)/q^2
     // qy = (qx)^2 + 2b(qx) + (b^2-n)/q = (qx+b)^2 - b^2 + qc = u^2 - (b^2 + qc)
-    debug_assert_eq!(y.clone() * &polynomial.a, u.clone().square() - n);
+    debug_assert_eq!(y.clone() * polynomial.a, u.clone().square() - n);
     // u = (qx+b)/q = x + b/q (mod n)
-    u *= &polynomial.q_inverse;
+    u *= polynomial.q_inverse;
     u %= n;
     // (u/q)^2 = x^2 + 2bx/q + (b^2/q^2) =!= y = qx^2 + 2bx + c (mod n)
     debug_assert!((u.clone().square() - y.clone()).is_divisible(n));

@@ -346,7 +346,7 @@ impl<'a> SIQSPolynomialData<'a> {
     }
 
     // returns the next polynomial and its roots modulo the primes in the factorbase
-    pub fn next_polynomial(&mut self) -> (Polynomial, &[Option<(u32, u32)>]) {
+    pub fn next_polynomial(&mut self) -> (Polynomial<'_>, &[Option<(u32, u32)>]) {
         self.num_polynomials += 1;
 
         // the first polynomial has already been computed in initialize_new_set_of_polynomials()
@@ -357,10 +357,10 @@ impl<'a> SIQSPolynomialData<'a> {
             debug_assert_eq!(b.clone().square() - self.a.clone() * c.clone(), *self.n);
             return (
                 Polynomial {
-                    a: self.a.clone(),
+                    a: &self.a,
                     b,
                     c,
-                    q_inverse: self.q_inverse_mod_n.clone(),
+                    q_inverse: &self.q_inverse_mod_n,
                 },
                 &self.roots,
             );
@@ -387,10 +387,10 @@ impl<'a> SIQSPolynomialData<'a> {
             self.num_a += 1;
             return (
                 Polynomial {
-                    a: self.a.clone(),
+                    a: &self.a,
                     b,
                     c,
-                    q_inverse: self.q_inverse_mod_n.clone(),
+                    q_inverse: &self.q_inverse_mod_n,
                 },
                 &self.roots,
             );
@@ -452,13 +452,13 @@ impl<'a> SIQSPolynomialData<'a> {
         }
         (
             Polynomial {
-                a: self.a.clone(),
+                a: &self.a,
                 b,
                 c,
-                q_inverse: self.q_inverse_mod_n.clone(),
+                q_inverse: &self.q_inverse_mod_n,
             },
             &self.roots,
-        ) // TODO: return reference
+        )
     }
 
     #[inline]

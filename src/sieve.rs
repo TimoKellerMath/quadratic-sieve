@@ -123,6 +123,10 @@ pub fn quadratic_sieve_multithreaded(
             let sender1 = sender.clone();
             s.spawn(move |_| {
                 let mut logs_for_polynomial = vec![0u8; 2 * sieve_interval_length];
+                // scratch reused across polynomials by the blocked sieve
+                let mut next_pos: Vec<usize> = Vec::with_capacity(2 * factorbase.len());
+                // scratch integer reused by factor_over_factorbase per candidate
+                let mut factor_scratch = Integer::new();
 
                 'outer_loop: loop {
                     if found.load(Ordering::Relaxed) {
@@ -137,6 +141,7 @@ pub fn quadratic_sieve_multithreaded(
                         roots,
                         &logs,
                         &mut logs_for_polynomial,
+                        &mut next_pos,
                         BLOCK_SIZE,
                     );
                     // threshold = log_2(kn/a) - log of largest prime - sum of small logs
@@ -168,6 +173,7 @@ pub fn quadratic_sieve_multithreaded(
                                     let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
                                     if let Some((relation, big_prime)) = factor_over_factorbase(
                                         x, &v, &factorbase, roots, k, large_prime_multiplier,
+                                        &mut factor_scratch,
                                     ) {
                                         if sender1
                                             .send((u, v, relation, big_prime, index_thread))
@@ -187,6 +193,7 @@ pub fn quadratic_sieve_multithreaded(
                             let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
                             if let Some((relation, big_prime)) = factor_over_factorbase(
                                 x, &v, &factorbase, roots, k, large_prime_multiplier,
+                                &mut factor_scratch,
                             ) {
                                 if sender1
                                     .send((u, v, relation, big_prime, index_thread))
