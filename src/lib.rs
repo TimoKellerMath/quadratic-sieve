@@ -1,5 +1,6 @@
 pub mod relations;
 pub mod siqs_generator;
+pub mod factorbase;
 pub mod multiplier;
 pub mod number_theory;
 pub mod polynomial_generator;

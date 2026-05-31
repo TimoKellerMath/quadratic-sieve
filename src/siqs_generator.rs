@@ -42,8 +42,10 @@ pub struct SIQSPolynomialData<'a> {
     factorbase: &'a [u32],
     n_roots: &'a [u32], // the roots of n modulo the primes in the factor base
     //sieve_interval_length: u64,
-    //prime_factors_for_q: &'a Vec<u32>, // we choose the q from this subset of the factorbase
-    pub num_polynomials: usize, // record the number of polynomials used
+    prime_factors_for_q: &'a [u32], // we choose the q from this subset of the factorbase
+    total_q_size: Float,            // target size of a = q^2, used to regenerate list_of_qis
+    window_offset: usize,           // shift of the prime window when regenerating fresh a's
+    pub num_polynomials: usize,     // record the number of polynomials used
 }
 
 impl<'a> SIQSPolynomialData<'a> {
@@ -60,6 +62,11 @@ impl<'a> SIQSPolynomialData<'a> {
         prime_factors_for_q: &'a [u32],
         roots: &'a [u32],
     ) -> SIQSPolynomialData<'a> {
+        // compute size of "average" qi
+        // q \approx sqrt((sqrt(2 * kn)/sieve_interval_length)
+        let total_q_size = ((2f32 * Float::with_val(PREC, n.clone())).sqrt()
+            / Float::with_val(PREC, sieve_interval_length))
+        .sqrt();
         let mut polynomial_data = SIQSPolynomialData {
             thread_number,
             j: 0, // index of polynomial for fixed a, 1 <= j <= 2^(s-1) - 1,
@@ -80,13 +87,11 @@ impl<'a> SIQSPolynomialData<'a> {
             n,
             factorbase,
             n_roots: roots,
+            prime_factors_for_q,
+            total_q_size: total_q_size.clone(),
+            window_offset: 0,
             num_polynomials: 0,
         };
-        // compute size of "average" qi
-        // q \approx sqrt((sqrt(2 * kn)/sieve_interval_length)
-        let total_q_size = ((2f32 * Float::with_val(PREC, n.clone())).sqrt()
-            / Float::with_val(PREC, sieve_interval_length))
-        .sqrt();
         polynomial_data.compute_list_of_factors_of_q(&total_q_size, prime_factors_for_q);
         polynomial_data.precompute_polynomial_data_for_q(n, factorbase, roots);
         debug_println!(
@@ -158,10 +163,16 @@ impl<'a> SIQSPolynomialData<'a> {
         //let range_size = Self::RANGE_MULTIPLIER * s;
         let i_min = i - range_size; // extend this for the next values of a
         assert!(prime_factors_for_q[i_min] > *self.thread_specific_factors.last().unwrap());
+        // window_offset shifts the window towards larger primes so that, once the
+        // current list of a's is exhausted, regenerating produces fresh
+        // combinations (of slightly larger q) instead of repeating the same a's.
+        let window = range_size * 2;
+        let max_start = prime_factors_for_q.len().saturating_sub(window);
+        let start = (i_min + self.window_offset).min(max_start).max(i_min);
         let combinations = prime_factors_for_q
             .iter()
-            .skip(i_min)
-            .take(range_size * 2)
+            .skip(start)
+            .take(window)
             .combinations(s);
         const SCALE: f32 = 65536.0;
         let prod_thread_specific_factors = self.prod_thread_specific_factors.to_f32();
@@ -344,9 +355,16 @@ impl<'a> SIQSPolynomialData<'a> {
         // after the last polynomial:
         // initialize_new_set_of_polynomials(index_thread)
         if self.j == 1 << (self.num_factors - 1) {
-            // generate new aself.num_a += 1;
+            // generate new a
             if self.num_a >= self.list_of_qis.len() {
-                panic!("need completely new set of q_i's.");
+                // exhausted all a's for the current prime window: shift the window
+                // towards larger primes and regenerate a fresh batch of a's instead
+                // of aborting the whole factorization.
+                self.window_offset += Self::Q_RANGE;
+                let total_q_size = self.total_q_size.clone();
+                let prime_factors_for_q = self.prime_factors_for_q;
+                self.compute_list_of_factors_of_q(&total_q_size, prime_factors_for_q);
+                self.num_a = 0;
             }
             self.precompute_polynomial_data_for_q(self.n, self.factorbase, self.n_roots);
             let b = self.b.clone();
@@ -476,6 +494,11 @@ impl<'a> SIQSPolynomialData<'a> {
         let nu = nu - 1;
         (rounded_exponent, nu)
     }
+
+    #[cfg(test)]
+    fn window_offset(&self) -> usize {
+        self.window_offset
+    }
 }
 
 pub fn new_polynomial_generators<'a>(
@@ -529,4 +552,45 @@ pub fn new_polynomial_generators<'a>(
         ));
     }
     thread_polynomial_data
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::factorbase::{make_factorbase, square_roots_mod_factorbase};
+
+    // C makes next_polynomial regenerate a fresh batch of a coefficients (by
+    // advancing window_offset) instead of panicking once the precomputed list is
+    // used up. Driving full exhaustion needs millions of polynomials for a
+    // realistic N, so test the mechanism directly: advancing window_offset and
+    // recomputing must shift the prime-selection window and thus the a's.
+    #[test]
+    fn test_window_offset_shifts_generated_as() {
+        // The 202-bit benchmark N: large enough that the q-factor index lands well
+        // past Q_RANGE (a smaller N would underflow the i - range_size index math).
+        let n = "6427752177035961102167848371107669985402627402189138248671463"
+            .parse::<Integer>()
+            .unwrap();
+        let factorbase = make_factorbase(&n, 1500);
+        let roots = square_roots_mod_factorbase(&n, &factorbase);
+        let mut generators =
+            new_polynomial_generators(&n, 65536, 1, &factorbase, &roots, &factorbase);
+        let generator = &mut generators[0];
+
+        assert_eq!(generator.window_offset(), 0);
+        let before = generator.list_of_qis.clone();
+        assert!(!before.is_empty());
+
+        // Simulate exhaustion: advance the window and regenerate (as the new
+        // branch in next_polynomial does) and confirm we get different a's.
+        let total_q_size = generator.total_q_size.clone();
+        generator.window_offset += SIQSPolynomialData::Q_RANGE;
+        generator.compute_list_of_factors_of_q(&total_q_size, &factorbase);
+        let after = generator.list_of_qis.clone();
+
+        assert_ne!(
+            before, after,
+            "advancing window_offset did not change the generated a coefficients"
+        );
+    }
 }
