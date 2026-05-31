@@ -195,8 +195,16 @@ pub fn factor_over_factorbase(
         i += 1;
     }
 
-    // u64 fast path with sqrt early termination
-    let mut y_u64 = y_.to_u64().unwrap();
+    // u64 fast path with sqrt early termination.
+    // If the cofactor still exceeds 64 bits after trial-dividing the whole factor
+    // base, its remaining prime factors are all larger than the largest factor-base
+    // prime; it cannot be a (single) large prime below largest_prime * lpm (which
+    // is far below 2^64), so this candidate yields no usable relation. This is the
+    // common case for larger N, where Q(x) is big enough that non-smooth cofactors
+    // stay above 64 bits.
+    let Some(mut y_u64) = y_.to_u64() else {
+        return None;
+    };
     while i < factorbase.len() {
         let p = factorbase[i] as u64;
         if p * p > y_u64 {

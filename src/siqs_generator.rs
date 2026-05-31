@@ -161,18 +161,30 @@ impl<'a> SIQSPolynomialData<'a> {
         self.num_factors = s + self.thread_specific_factors.len();
         let range_size = Self::Q_RANGE;
         //let range_size = Self::RANGE_MULTIPLIER * s;
-        let i_min = i - range_size; // extend this for the next values of a
-        assert!(prime_factors_for_q[i_min] > *self.thread_specific_factors.last().unwrap());
-        // window_offset shifts the window towards larger primes so that, once the
-        // current list of a's is exhausted, regenerating produces fresh
-        // combinations (of slightly larger q) instead of repeating the same a's.
-        let window = range_size * 2;
-        let max_start = prime_factors_for_q.len().saturating_sub(window);
-        let start = (i_min + self.window_offset).min(max_start).max(i_min);
+        let n_primes = prime_factors_for_q.len();
+        // q's prime factors must be larger than every thread-specific factor (so
+        // they stay distinct from them) and must skip the -1 sentinel at index 0;
+        // `lo` is the first factor-base index that satisfies this.
+        let tsf_last = *self.thread_specific_factors.last().unwrap();
+        let lo = prime_factors_for_q
+            .iter()
+            .position(|&p| p > tsf_last)
+            .unwrap_or(0);
+        // Window of `window` primes from which we pick combinations of `s`,
+        // positioned near the ideal index `i`. Clamp every index into
+        // [lo, n_primes) so the math can't underflow for small N (where the ideal
+        // q is tiny, pushing `i` below range_size) or run past a short factor base.
+        // window_offset shifts the window towards larger primes when a previous
+        // batch of a's was exhausted, yielding fresh combinations.
+        let window = (range_size * 2).min(n_primes.saturating_sub(lo)).max(s);
+        let i_min = i.saturating_sub(range_size).max(lo);
+        let max_start = n_primes.saturating_sub(window).max(lo);
+        let start = (i_min + self.window_offset).clamp(lo, max_start);
+        let take = window.min(n_primes - start);
         let combinations = prime_factors_for_q
             .iter()
             .skip(start)
-            .take(window)
+            .take(take)
             .combinations(s);
         const SCALE: f32 = 65536.0;
         let prod_thread_specific_factors = self.prod_thread_specific_factors.to_f32();
@@ -593,5 +605,38 @@ mod tests {
             before, after,
             "advancing window_offset did not change the generated a coefficients"
         );
+    }
+
+    // Small N: the factor base is short and the ideal q is tiny, so the
+    // prime-selection window sits near the start of the factor base. Building a
+    // generator must not panic (it used to underflow `i - range_size` and trip
+    // the window assert) and must produce a usable set of distinct a-factors.
+    #[test]
+    fn test_small_n_generator_builds() {
+        let p = ((Integer::from(1) << 16u32) + 12345u32).next_prime();
+        let q = ((Integer::from(1) << 16u32) + 67890u32).next_prime();
+        let n = p * q;
+        let factorbase = make_factorbase(&n, 100);
+        let roots = square_roots_mod_factorbase(&n, &factorbase);
+        let generators =
+            new_polynomial_generators(&n, 65536, 1, &factorbase, &roots, &factorbase);
+        let g = &generators[0];
+        assert!(g.s >= 2, "need at least two q-factors, got s={}", g.s);
+        assert!(
+            !g.list_of_qis.is_empty(),
+            "no a coefficients generated for small N"
+        );
+        // every chosen q-factor must be a real factor-base prime (> 2) and the
+        // factors within one a must be distinct
+        for qis in &g.list_of_qis {
+            assert_eq!(qis.len(), g.num_factors);
+            for &qi in qis {
+                assert!(qi > 2 && factorbase.contains(&qi));
+            }
+            let mut sorted = qis.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), qis.len(), "duplicate q-factor in a");
+        }
     }
 }
