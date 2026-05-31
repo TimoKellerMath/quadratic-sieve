@@ -91,7 +91,7 @@ pub fn compute_sieve_parameters(bits: usize) -> (usize, usize, u32) {
         return (
             last_parameter.factorbase_size,
             last_parameter.sieve_size,
-            first_parameter.large_prime_multiplier,
+            last_parameter.large_prime_multiplier,
         );
     }
 
