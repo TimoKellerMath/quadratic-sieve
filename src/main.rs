@@ -79,13 +79,12 @@ fn quadratic_sieve_multithreaded(
                     FxHashMap::<u32, (FixedBitSet, Integer, Integer)>::default();
 
                 loop {
-                    let (mut u, mut v, mut relation, big_prime, index_thread): (
-                        Integer,
-                        Integer,
-                        FixedBitSet,
-                        u32,
-                        usize,
-                    ) = receiver.recv().unwrap();
+                    let received: Result<(Integer, Integer, FixedBitSet, u32, usize), _> =
+                        receiver.recv();
+                    // all producers have exited and dropped their senders: stop.
+                    let Ok((mut u, mut v, mut relation, big_prime, index_thread)) = received else {
+                        return;
+                    };
                     // add relation, index, (u,v)
                     if big_prime > 1 {
                         if let Some((relation2, u2, v2)) = big_prime_relations.get(&big_prime) {
@@ -208,6 +207,9 @@ fn quadratic_sieve_multithreaded(
                 }
             });
         }
+        // drop the original sender so the consumer's recv() terminates once every
+        // producer (each holding a clone) has exited.
+        drop(sender);
     });
     Ok(shared_factor.lock().unwrap().clone())
 }
