@@ -4,6 +4,7 @@ pub mod factorbase;
 pub mod multiplier;
 pub mod number_theory;
 pub mod polynomial_generator;
+pub mod sieve;
 pub mod constants;
 pub mod format_color;
 pub mod debug_print;
