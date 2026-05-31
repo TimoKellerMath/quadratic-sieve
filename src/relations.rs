@@ -34,7 +34,12 @@ impl RelationOperationData for Relations {
     #[inline]
     fn add_relation(&mut self, relation: FixedBitSet, xy: (Integer, Integer)) {
         self.relations.push(relation);
-        let mut new_index = FixedBitSet::with_capacity(self.factorbase_size());
+        // relations.len() transiently reaches factorbase_size + 1: the rank can
+        // grow up to factorbase_size, and the next relation is pushed (setting bit
+        // index factorbase_size here) before gaussian_elimination pops the
+        // guaranteed-dependent row. All index bitsets must share this capacity so
+        // the ^= in gaussian_elimination stays in bounds.
+        let mut new_index = FixedBitSet::with_capacity(self.factorbase_size() + 1);
         new_index.set(self.relations.len() - 1, true);
         self.indices.push(new_index);
         // progress report every 10% of the factorbase size
