@@ -1,5 +1,4 @@
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -33,7 +32,6 @@ type RelationMsg = (Integer, Integer, FixedBitSet, u32, u32, usize);
 fn run_sieve_producer(
     index_thread: usize,
     polynomial_generator: &mut SIQSPolynomialData,
-    found: &AtomicBool,
     logs: &[u8],
     factorbase: &[u32],
     reciprocals: &[u64],
@@ -58,10 +56,10 @@ fn run_sieve_producer(
     let mut u_scratch = Integer::new();
     let mut v_scratch = Integer::new();
 
+    // Producers run forever: a producer never decides on its own to stop. The
+    // consumer is the sole authority that terminates them — it drops the relation
+    // receiver, and the next `send` below then fails and breaks `'outer_loop`.
     'outer_loop: loop {
-        if found.load(Ordering::Relaxed) {
-            break 'outer_loop;
-        }
         let (polynomial, roots) = polynomial_generator.next_polynomial();
         debug_print!("{}", format_color("?", index_thread));
         const BLOCK_SIZE: usize = 2 * 65536;
@@ -223,13 +221,11 @@ pub fn quadratic_sieve_multithreaded(
     println!("double large prime: {use_dlp}");
     let n = Arc::new(n);
     let kn = Arc::new(kn.clone());
-    let found = Arc::new(AtomicBool::new(false));
     let shared_factor = Arc::new(Mutex::new(None));
     rayon::scope(|s| {
         let (sender, receiver) = mpsc::channel();
         // consumer thread: processes (partial) relations
         {
-            let found = Arc::clone(&found);
             let shared_factor = Arc::clone(&shared_factor);
             let factorbase = Arc::clone(&factorbase);
             let n = Arc::clone(&n);
@@ -287,11 +283,12 @@ pub fn quadratic_sieve_multithreaded(
                     if let Some(relation) = relations.gaussian_elimination() {
                         debug_print!("{}", format_color("!", index_thread));
                         if let Some(factor) = relations.find_factor(&relation, &n) {
+                            // dropping the receiver makes every producer's next
+                            // `send` fail, terminating them.
                             drop(receiver);
                             println!("\nfound factor: {factor} (thread #{index_thread})");
                             io::stdout().flush().unwrap();
                             *shared_factor.lock().unwrap() = Some(factor);
-                            found.store(true, Ordering::Relaxed);
                             return;
                         }
                         // relation was not useful, drop the last relation
@@ -304,7 +301,6 @@ pub fn quadratic_sieve_multithreaded(
         spawn_sieve_producers(
             s,
             &mut polynomial_generators,
-            &found,
             &logs,
             &factorbase,
             &reciprocals,
@@ -329,7 +325,6 @@ pub fn quadratic_sieve_multithreaded(
 fn spawn_sieve_producers<'scope, 'env>(
     s: &rayon::Scope<'scope>,
     polynomial_generators: &'scope mut [SIQSPolynomialData<'env>],
-    found: &'scope Arc<AtomicBool>,
     logs: &'scope Arc<Vec<u8>>,
     factorbase: &'scope Arc<Vec<u32>>,
     reciprocals: &'scope Arc<Vec<u64>>,
@@ -342,7 +337,6 @@ fn spawn_sieve_producers<'scope, 'env>(
     sender: &mpsc::Sender<RelationMsg>,
 ) {
     for (index_thread, polynomial_generator) in polynomial_generators.iter_mut().enumerate() {
-        let found = Arc::clone(found);
         let logs = Arc::clone(logs);
         let factorbase = Arc::clone(factorbase);
         let reciprocals = Arc::clone(reciprocals);
@@ -352,7 +346,6 @@ fn spawn_sieve_producers<'scope, 'env>(
             run_sieve_producer(
                 index_thread,
                 polynomial_generator,
-                &found,
                 &logs,
                 &factorbase,
                 &reciprocals,
@@ -425,13 +418,11 @@ pub fn quadratic_sieve_lanczos(
     println!("double large prime: {use_dlp}");
     let n = Arc::new(n);
     let kn = Arc::new(kn.clone());
-    let found = Arc::new(AtomicBool::new(false));
     let shared_factor = Arc::new(Mutex::new(None));
     rayon::scope(|s| {
         let (sender, receiver) = mpsc::channel();
         // consumer thread: combine partials, accumulate full relations, then solve
         {
-            let found = Arc::clone(&found);
             let shared_factor = Arc::clone(&shared_factor);
             let factorbase = Arc::clone(&factorbase);
             let n = Arc::clone(&n);
@@ -459,15 +450,14 @@ pub fn quadratic_sieve_lanczos(
                 // time each 10% step so slow ones can be flagged
                 let mut last_step_time = collection_start;
 
-                loop {
-                    // enough once we hold RELATION_SURPLUS more distinct relations than
-                    // distinct primes appearing — then the kernel is at least that big.
-                    if sparse.len() >= appeared_count + RELATION_SURPLUS {
-                        break;
-                    }
+                // Producers run forever; this consumer is the sole authority that
+                // stops them. Collect until we hold RELATION_SURPLUS more distinct
+                // relations than distinct primes appearing — then the kernel (hence
+                // the number of dependencies) is at least that big.
+                while sparse.len() < appeared_count + RELATION_SURPLUS {
                     let Ok((u, v, relation, p, q, index_thread)) = receiver.recv() else {
-                        // all producers exited (e.g. polynomial exhaustion): solve with
-                        // whatever we have.
+                        // Producers never exit on their own, so a closed channel can
+                        // only mean a producer panicked: nothing more will arrive.
                         break;
                     };
                     let full = if p == 1 && q == 1 {
@@ -505,9 +495,8 @@ pub fn quadratic_sieve_lanczos(
                         }
                     }
                 }
-                // stop the producers and drop the receiver so their sends error out,
-                // then run the linear algebra.
-                found.store(true, Ordering::Relaxed);
+                // Enough relations collected: terminate every producer — dropping the
+                // receiver makes their next `send` fail — then run the linear algebra.
                 drop(receiver);
                 let collection_time = collection_start.elapsed();
                 println!(
@@ -539,7 +528,6 @@ pub fn quadratic_sieve_lanczos(
         spawn_sieve_producers(
             s,
             &mut polynomial_generators,
-            &found,
             &logs,
             &factorbase,
             &reciprocals,
