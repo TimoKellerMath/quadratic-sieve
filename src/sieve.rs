@@ -49,6 +49,8 @@ pub fn quadratic_sieve_multithreaded(
         &factorbase_without_k,
     );
     let logs = Arc::new(compute_logs(&factorbase));
+    // Barrett reciprocals for the resieve step's per-prime `x mod p`.
+    let reciprocals = Arc::new(compute_reciprocals(&factorbase));
     let factorbase = Arc::new(factorbase.clone());
     let kn_bits = kn.significant_bits();
     // double large prime variation: only worthwhile for larger N, where non-smooth
@@ -126,6 +128,7 @@ pub fn quadratic_sieve_multithreaded(
             let found = Arc::clone(&found);
             let logs = Arc::clone(&logs);
             let factorbase = Arc::clone(&factorbase);
+            let reciprocals = Arc::clone(&reciprocals);
             let kn = Arc::clone(&kn);
             // create thread #i that computes (num_threads) new q's if there is none available in qs (atomic)
             // storing the relations and the linear algebra step is atomic
@@ -192,8 +195,8 @@ pub fn quadratic_sieve_multithreaded(
                                     let x = (idx as i32) - (sieve_interval_length as i32);
                                     let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
                                     if let Some((relation, p, q)) = factor_over_factorbase(
-                                        x, &v, &factorbase, roots, k, large_prime_multiplier,
-                                        use_dlp, &mut factor_scratch,
+                                        x, &v, &factorbase, roots, &reciprocals, k,
+                                        large_prime_multiplier, use_dlp, &mut factor_scratch,
                                     ) {
                                         if sender1
                                             .send((u, v, relation, p, q, index_thread))
@@ -212,8 +215,8 @@ pub fn quadratic_sieve_multithreaded(
                             let x = (i as i32) - (sieve_interval_length as i32);
                             let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
                             if let Some((relation, p, q)) = factor_over_factorbase(
-                                x, &v, &factorbase, roots, k, large_prime_multiplier,
-                                use_dlp, &mut factor_scratch,
+                                x, &v, &factorbase, roots, &reciprocals, k,
+                                large_prime_multiplier, use_dlp, &mut factor_scratch,
                             ) {
                                 if sender1
                                     .send((u, v, relation, p, q, index_thread))

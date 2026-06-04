@@ -18,6 +18,24 @@ pub fn make_factorbase(n: &Integer, size: usize) -> Vec<u32> {
     factorbase
 }
 
+// Precompute a Barrett reciprocal m = floor(2^64 / p) for each factor-base prime,
+// so the resieve step can compute `x mod p` with a multiply+shift instead of a
+// hardware division (see `x_mod_p` in relations.rs). Entries for the -1 / sentinel
+// slot (p < 2) are 0 and never used: the resieve only touches indices >=
+// NUM_SKIP_PRIMES, where every prime is well above 2.
+pub fn compute_reciprocals(factorbase: &[u32]) -> Vec<u64> {
+    factorbase
+        .iter()
+        .map(|&p| {
+            if p >= 2 {
+                ((1u128 << 64) / p as u128) as u64
+            } else {
+                0
+            }
+        })
+        .collect()
+}
+
 // compute rounded log_2(p) as u8 for p in the factor base
 pub fn compute_logs(factorbase: &[u32]) -> Vec<u8> {
     std::iter::once(0u8) // log_2|-1|

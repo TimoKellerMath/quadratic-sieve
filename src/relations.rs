@@ -282,6 +282,25 @@ impl PartialStore {
     }
 }
 
+// Compute `x.rem_euclid(p)` (result in [0, p)) using a precomputed Barrett
+// reciprocal `recip = floor(2^64 / p)`, replacing the per-prime hardware division
+// in the resieve loop with a multiply+shift. `x` is given split into magnitude and
+// sign so the same reduction serves the byte- and u64-cofactor passes.
+//
+// Correctness: for a = |x| < 2^32 and p in [2, 2^32), q = floor(a*recip / 2^64) is
+// floor(a/p) or one less, so r = a - q*p lands in [0, 2p) and a single conditional
+// subtraction reduces it to a mod p. The Euclidean fixup maps a negative x to p - r.
+#[inline]
+fn x_mod_p(x_abs: u32, x_neg: bool, p: u32, recip: u64) -> u32 {
+    let q = ((x_abs as u128 * recip as u128) >> 64) as u64;
+    let mut r = x_abs as u64 - q * p as u64;
+    if r >= p as u64 {
+        r -= p as u64;
+    }
+    let r = r as u32;
+    if x_neg && r != 0 { p - r } else { r }
+}
+
 // try to factor y = Q(x) over factorbase, using resieve: only divide by p if x ≡ root (mod p).
 // On success returns the relation together with up to two large primes (1 = none):
 //   (relation, 1, 1)  full relation
@@ -292,6 +311,7 @@ pub fn factor_over_factorbase(
     y: &Integer,
     factorbase: &[u32],
     roots: &[Option<(u32, u32)>],
+    reciprocals: &[u64],
     k: u32,
     large_prime_multiplier: u32,
     use_dlp: bool,
@@ -333,7 +353,10 @@ pub fn factor_over_factorbase(
         }
     }
 
-    let x64 = x as i64;
+    // x is constant across the resieve; reduce it mod each p via the Barrett
+    // reciprocals instead of a hardware divide per prime.
+    let x_abs = x.unsigned_abs();
+    let x_neg = x < 0;
     // indices NUM_SKIP_PRIMES..: sieved primes. p | Q(x) iff x ≡ root1 or root2 (mod p),
     // so skip the big-int divisibility test for primes that don't hit x.
     let mut i = NUM_SKIP_PRIMES;
@@ -344,7 +367,7 @@ pub fn factor_over_factorbase(
         let p = factorbase[i];
         let divides = match roots[i] {
             Some((r1, r2)) => {
-                let xmp = x64.rem_euclid(p as i64) as u32;
+                let xmp = x_mod_p(x_abs, x_neg, p, reciprocals[i]);
                 xmp == r1 || xmp == r2
             }
             None => y_.is_divisible_u(p), // p | a: resieve info unavailable
@@ -382,7 +405,7 @@ pub fn factor_over_factorbase(
         }
         let divides = match roots[i] {
             Some((r1, r2)) => {
-                let xmp = x64.rem_euclid(p as i64) as u64;
+                let xmp = x_mod_p(x_abs, x_neg, factorbase[i], reciprocals[i]) as u64;
                 xmp == r1 as u64 || xmp == r2 as u64
             }
             None => y_u64 % p == 0,
@@ -626,4 +649,35 @@ pub fn evaluate_polynomial_at(x: i32, polynomial: &Polynomial, n: &Integer) -> (
     // (u/q)^2 = x^2 + 2bx/q + (b^2/q^2) =!= y = qx^2 + 2bx + c (mod n)
     debug_assert!((u.clone().square() - y.clone()).is_divisible(n));
     (u, y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn x_mod_p_matches_rem_euclid() {
+        // a spread of factor-base-sized primes, including the largest that fits in u32
+        let primes: [u32; 7] = [5, 97, 65537, 1_000_003, 16_777_213, 100_003, 4_294_967_291];
+        // x values: extremes plus a scattering of both signs
+        let xs: [i32; 9] = [
+            0,
+            1,
+            -1,
+            i32::MAX,
+            i32::MIN,
+            1_234_567,
+            -1_234_567,
+            -65_536,
+            2_000_000_000,
+        ];
+        for &p in &primes {
+            let recip = ((1u128 << 64) / p as u128) as u64;
+            for &x in &xs {
+                let got = x_mod_p(x.unsigned_abs(), x < 0, p, recip);
+                let want = (x as i64).rem_euclid(p as i64) as u32;
+                assert_eq!(got, want, "x_mod_p({x}, {p})");
+            }
+        }
+    }
 }
