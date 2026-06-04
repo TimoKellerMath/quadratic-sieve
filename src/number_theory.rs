@@ -69,24 +69,94 @@ pub fn is_small_composite(n: &Integer) -> bool {
     SMALL_PRIMES.iter().any(|&p| *n != p && n.is_divisible_u(p))
 }
 
-// (a * b) mod m, using a 128-bit intermediate to avoid overflow.
-#[inline]
-fn mulmod_u64(a: u64, b: u64, m: u64) -> u64 {
-    ((a as u128 * b as u128) % m as u128) as u64
+// Montgomery arithmetic modulo an odd `n`, replacing the per-multiply 128-bit
+// division of a plain `(a * b) % n` with the cheaper REDC reduction. Values are held
+// in Montgomery form `a * R mod n` with `R = 2^64`; `mul` keeps that form, and
+// `gcd(x, n)` is unaffected by the form because `gcd(R, n) = 1` for odd `n` (so
+// Pollard-rho can run entirely in Montgomery form).
+struct Montgomery {
+    n: u64,
+    neg_ninv: u64, // -n^{-1} mod 2^64
+    r2: u64,       // R^2 mod n, converts a plain residue into Montgomery form
+    one: u64,      // R mod n = Montgomery form of 1
 }
 
-// a^e mod m
-fn powmod_u64(mut a: u64, mut e: u64, m: u64) -> u64 {
-    let mut result = 1u64 % m;
-    a %= m;
-    while e > 0 {
-        if e & 1 == 1 {
-            result = mulmod_u64(result, a, m);
+impl Montgomery {
+    // `n` must be odd and > 1.
+    fn new(n: u64) -> Montgomery {
+        debug_assert!(n & 1 == 1 && n > 1);
+        // n^{-1} mod 2^64 by Newton iteration; each step doubles the correct bits,
+        // so 6 steps from a 1-bit seed reach the full 64 bits.
+        let mut ninv = 1u64;
+        for _ in 0..6 {
+            ninv = ninv.wrapping_mul(2u64.wrapping_sub(n.wrapping_mul(ninv)));
         }
-        a = mulmod_u64(a, a, m);
-        e >>= 1;
+        // R mod n = 2^64 mod n = (-n) mod n
+        let r = n.wrapping_neg() % n;
+        let r2 = ((r as u128 * r as u128) % n as u128) as u64;
+        Montgomery {
+            n,
+            neg_ninv: ninv.wrapping_neg(),
+            r2,
+            one: r,
+        }
     }
-    result
+
+    // REDC: given x = a*b < n * 2^64, return a*b*R^{-1} mod n in [0, n).
+    #[inline]
+    fn reduce(&self, x: u128) -> u64 {
+        let q = (x as u64).wrapping_mul(self.neg_ninv); // chosen so x + q*n ≡ 0 (mod 2^64)
+        let m = q as u128 * self.n as u128;
+        let (sum, carry) = x.overflowing_add(m);
+        let t = (sum >> 64) as u64; // (x + q*n) / 2^64, exact since the low word cancels
+        // the quotient is < 2n; one conditional subtraction lands it in [0, n).
+        // A carry out of 128 bits means the true quotient is t + 2^64, and
+        // t.wrapping_sub(n) yields that value reduced mod n in one step.
+        if carry {
+            t.wrapping_sub(self.n)
+        } else if t >= self.n {
+            t - self.n
+        } else {
+            t
+        }
+    }
+
+    #[inline]
+    fn mul(&self, a: u64, b: u64) -> u64 {
+        self.reduce(a as u128 * b as u128)
+    }
+
+    // convert a plain residue into Montgomery form
+    #[inline]
+    fn to_mont(&self, a: u64) -> u64 {
+        self.mul(a % self.n, self.r2)
+    }
+
+    // a + b for a, b in [0, n), result in [0, n)
+    #[inline]
+    fn add(&self, a: u64, b: u64) -> u64 {
+        let (s, carry) = a.overflowing_add(b);
+        if carry || s >= self.n {
+            s.wrapping_sub(self.n)
+        } else {
+            s
+        }
+    }
+
+    // base^exp mod n, with `base` a plain residue; the result is returned in
+    // Montgomery form (the caller compares it against `one` / `n - one`).
+    fn pow(&self, base: u64, mut exp: u64) -> u64 {
+        let mut result = self.one;
+        let mut b = self.to_mont(base);
+        while exp > 0 {
+            if exp & 1 == 1 {
+                result = self.mul(result, b);
+            }
+            b = self.mul(b, b);
+            exp >>= 1;
+        }
+        result
+    }
 }
 
 #[inline]
@@ -99,18 +169,22 @@ fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
-// Deterministic Miller–Rabin primality test for n < 2^64. The witness set
-// {2,3,5,7,11,13,17,19,23,29,31,37} is known to be correct for all n < 3.3 * 10^24.
-pub fn is_prime_u64(n: u64) -> bool {
-    const WITNESSES: [u64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
+// Deterministic Miller–Rabin over the given witness set: returns true iff no
+// witness proves `n` composite. With a witness set known to be complete for the
+// range of `n`, this is an exact primality test. `n` divisible by a witness is
+// resolved directly (prime iff equal to that witness).
+fn miller_rabin(n: u64, witnesses: &[u64]) -> bool {
     if n < 2 {
         return false;
     }
-    for &p in &WITNESSES {
+    for &p in witnesses {
         if n % p == 0 {
             return n == p;
         }
     }
+    // n is now odd and coprime to every witness, so Montgomery arithmetic applies.
+    let mont = Montgomery::new(n);
+    let neg_one = n - mont.one; // Montgomery form of n - 1
     // write n - 1 = d * 2^s with d odd
     let mut d = n - 1;
     let mut s = 0u32;
@@ -118,20 +192,64 @@ pub fn is_prime_u64(n: u64) -> bool {
         d >>= 1;
         s += 1;
     }
-    'witness: for &a in &WITNESSES {
-        let mut x = powmod_u64(a, d, n);
-        if x == 1 || x == n - 1 {
+    'witness: for &a in witnesses {
+        let mut x = mont.pow(a, d);
+        if x == mont.one || x == neg_one {
             continue;
         }
         for _ in 0..s - 1 {
-            x = mulmod_u64(x, x, n);
-            if x == n - 1 {
+            x = mont.mul(x, x);
+            if x == neg_one {
                 continue 'witness;
             }
         }
         return false;
     }
     true
+}
+
+// Deterministic primality test for n < 2^64. The witness set
+// {2,3,5,7,11,13,17,19,23,29,31,37} is known to be correct for all n < 3.3 * 10^24.
+pub fn is_prime_u64(n: u64) -> bool {
+    const WITNESSES: [u64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
+    miller_rabin(n, &WITNESSES)
+}
+
+// Deterministic primality test for n < 2^32. The witness set {2, 7, 61} is known
+// to be correct for all n < 4,759,123,141 > 2^32, so only three rounds are needed
+// — cheaper than the full 2^64 set when the input is known to fit in 32 bits.
+pub fn is_prime_u32(n: u64) -> bool {
+    debug_assert!(n < 1u64 << 32);
+    const WITNESSES: [u64; 3] = [2, 7, 61];
+    miller_rabin(n, &WITNESSES)
+}
+
+// Single strong-probable-prime round to base 2 for odd n > 2. A `false` result
+// means base 2 is a Miller–Rabin witness, which is a *certificate* that n is
+// composite; `true` means n is only a probable prime. Used to cheaply reject the
+// common single-prime cofactor before attempting a Pollard-rho split (which would
+// not terminate on a prime): one modular exponentiation instead of a full test.
+pub fn is_probable_prime_base2(n: u64) -> bool {
+    debug_assert!(n & 1 == 1 && n > 2);
+    let mont = Montgomery::new(n);
+    let neg_one = n - mont.one; // Montgomery form of n - 1
+    let mut d = n - 1;
+    let mut s = 0u32;
+    while d & 1 == 0 {
+        d >>= 1;
+        s += 1;
+    }
+    let mut x = mont.pow(2, d);
+    if x == mont.one || x == neg_one {
+        return true;
+    }
+    for _ in 0..s - 1 {
+        x = mont.mul(x, x);
+        if x == neg_one {
+            return true;
+        }
+    }
+    false
 }
 
 // Pollard's rho: return a non-trivial divisor of the composite, odd `n`.
@@ -141,21 +259,25 @@ pub fn pollard_rho_u64(n: u64) -> u64 {
     if n & 1 == 0 {
         return 2;
     }
-    // Floyd cycle detection on x -> x^2 + c (mod n); bump c on failure.
-    let mut c = 1u64;
+    // Floyd cycle detection on x -> x^2 + c (mod n), carried out in Montgomery form;
+    // bump c on failure. gcd(diff, n) is unchanged by the Montgomery form, so the
+    // returned divisor is a genuine factor of n.
+    let mont = Montgomery::new(n);
+    let two = mont.to_mont(2);
+    let mut c = mont.one; // Montgomery form of c, starting at 1
     loop {
-        let f = |x: u64| (mulmod_u64(x, x, n) + c) % n;
-        let (mut x, mut y, mut d) = (2u64, 2u64, 1u64);
+        let f = |x: u64| mont.add(mont.mul(x, x), c);
+        let (mut x, mut y, mut d) = (two, two, 1u64);
         while d == 1 {
             x = f(x);
             y = f(f(y));
-            let diff = if x > y { x - y } else { y - x };
+            let diff = if x >= y { x - y } else { y - x };
             d = gcd_u64(diff, n);
         }
         if d != n {
             return d;
         }
-        c += 1;
+        c = mont.add(c, mont.one); // c += 1
     }
 }
 
@@ -435,6 +557,60 @@ mod tests {
     use rug::integer::IsPrime;
 
     use super::*;
+
+    #[test]
+    fn test_montgomery_primality() {
+        // cross-check the u64/u32 deterministic tests against rug, including primes
+        // and semiprimes whose product exceeds 2^63 (exercises reduce's carry path).
+        let cases: [u64; 14] = [
+            3,
+            61,
+            65537,
+            4_294_967_291,        // largest prime < 2^32
+            4_294_967_295,        // 3 * 5 * 17 * 257 * 65537
+            1_000_000_007,
+            1_000_000_007 * 998_244_353, // semiprime ~ 2^60
+            (1u64 << 61) - 1,            // Mersenne prime M61
+            18_446_744_073_709_551_557,  // largest prime < 2^64
+            2047,                        // base-2 strong pseudoprime, actually 23 * 89
+            3_215_031_751,               // strong pseudoprime to bases 2,3,5,7
+            (1u64 << 62) + 1,
+            (4_000_000_007u64) * (4_000_000_009u64), // ~2^63.5 semiprime
+            9_999_999_999_999_999_999,
+        ];
+        for &n in &cases {
+            let want = matches!(
+                Integer::from(n).is_probably_prime(40),
+                IsPrime::Yes | IsPrime::Probably
+            );
+            assert_eq!(is_prime_u64(n), want, "is_prime_u64({n})");
+            if n < 1u64 << 32 {
+                assert_eq!(is_prime_u32(n), want, "is_prime_u32({n})");
+            }
+            if n & 1 == 1 && n > 2 {
+                // a `false` base-2 result must be a genuine compositeness certificate
+                if !is_probable_prime_base2(n) {
+                    assert!(!want, "base-2 wrongly certified prime {n} composite");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_pollard_rho_splits_semiprimes() {
+        // odd composites including a > 2^63 product; rho must return a proper factor.
+        let cases: [u64; 5] = [
+            23 * 89,
+            1_000_000_007 * 998_244_353,
+            4_294_967_291 * 4_294_967_279,       // ~2^63.99, two large primes
+            (4_000_000_007u64) * (4_000_000_009u64),
+            3_215_031_751,
+        ];
+        for &n in &cases {
+            let d = pollard_rho_u64(n);
+            assert!(d > 1 && d < n && n % d == 0, "pollard_rho_u64({n}) = {d}");
+        }
+    }
 
     #[test]
     fn test_is_pseudoprime() {

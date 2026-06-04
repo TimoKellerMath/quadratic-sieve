@@ -1,4 +1,4 @@
-use crate::number_theory::{is_prime_u64, pollard_rho_u64};
+use crate::number_theory::{is_prime_u32, is_probable_prime_base2, pollard_rho_u64};
 use crate::{constants::NUM_SKIP_PRIMES, polynomial_generator::Polynomial};
 use fixedbitset::FixedBitSet;
 use itertools::izip;
@@ -427,10 +427,17 @@ pub fn factor_over_factorbase(
     // double large prime variation: y_u64 is a product of large primes (it survived
     // trial division by the whole factor base). Accept it only if it splits into two
     // primes, each below lp_bound, i.e. y_u64 is a semiprime <= lp_bound^2.
-    if use_dlp && y_u64 <= lp_bound * lp_bound && !is_prime_u64(y_u64) {
+    //
+    // The common case here is a single prime cofactor > lp_bound (useless): the
+    // base-2 test rejects it with one modular exponentiation, where the full
+    // primality test would run all its witnesses on a prime (the worst case). A
+    // `false` result certifies compositeness, so the Pollard-rho split below is
+    // guaranteed to terminate. p and q are <= lp_bound < 2^32, so the cheaper
+    // 3-witness is_prime_u32 suffices to confirm them prime.
+    if use_dlp && y_u64 <= lp_bound * lp_bound && !is_probable_prime_base2(y_u64) {
         let p = pollard_rho_u64(y_u64);
         let q = y_u64 / p;
-        if p <= lp_bound && q <= lp_bound && is_prime_u64(p) && is_prime_u64(q) {
+        if p <= lp_bound && q <= lp_bound && is_prime_u32(p) && is_prime_u32(q) {
             if p == q {
                 // cofactor is a prime square: already a perfect square, so the large
                 // prime contributes nothing to the parity vector. This is a full
