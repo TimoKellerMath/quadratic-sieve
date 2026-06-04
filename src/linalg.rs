@@ -548,31 +548,28 @@ fn elimination(bvec1: &[u64], bvec2: &[u64], vec1: &[u64], vec2: &[u64]) -> (u32
     (nsols, result)
 }
 
-/// Block Lanczos over GF(2): returns a set of dependencies (each a subset of relation
-/// indices whose rows XOR to the zero vector), the same contract as
-/// [`dense_left_null_space`]. Up to 64 independent dependencies are returned per call.
-///
-/// `seed` randomizes the starting block (Montgomery's algorithm is randomized); a
-/// fixed seed makes the result reproducible. Returns `None` if the inner breakdown
-/// occurs (the start vector was unlucky — the caller should retry with a fresh seed
-/// and/or fall back to the dense solver); `Some(deps)` otherwise (possibly empty if
-/// the kernel really is trivial).
-pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option<Vec<Vec<usize>>> {
-    let n_r = rows.len(); // relations = iteration dimension (columns of B)
-    let n_f = num_columns; // primes = rows of B
-    if n_r == 0 {
-        return Some(Vec::new());
-    }
-
-    // column-major transpose index for the parallel `mul_regular`: cols_to_rows[p] is
-    // the list of relations containing prime p. Built once; reused every iteration.
+// column-major transpose index for the parallel `mul_regular`: cols_to_rows[p] is the
+// list of relations containing prime p.
+fn build_transpose(rows: &[Vec<u32>], n_f: usize) -> Vec<Vec<u32>> {
     let mut cols_to_rows: Vec<Vec<u32>> = vec![Vec::new(); n_f];
     for (r, cols) in rows.iter().enumerate() {
         for &p in cols {
             cols_to_rows[p as usize].push(r as u32);
         }
     }
+    cols_to_rows
+}
 
+// Run the Block Lanczos iteration and return the raw blocks (X, V0), each a length-n_r
+// array of 64-bit columns. `A·X = 0` (X spans up to 64 vectors of ker(A)). Returns
+// None on the inner breakdown.
+fn lanczos_iterate(
+    rows: &[Vec<u32>],
+    cols_to_rows: &[Vec<u32>],
+    n_r: usize,
+    n_f: usize,
+    seed: u64,
+) -> Option<(Vec<u64>, Vec<u64>)> {
     // xorshift RNG for the random starting block Y (stored in `x`)
     let mut state = seed ^ 0x9E3779B97F4A7C15u64 ^ (n_r as u64).wrapping_mul(0x100000001B3);
     let mut rng = || {
@@ -593,10 +590,10 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
     let mut work1 = vec![0u64; n_f];
 
     // init: Q = A·Y ; V0 = Q ; AV0 = A·V0 ; T0 = V0ᵀ A V0
-    mul_regular_par(&cols_to_rows, &x, &mut work1);
+    mul_regular_par(cols_to_rows, &x, &mut work1);
     mul_transpose_par(rows, &work1, &mut q);
     v0.copy_from_slice(&q);
-    mul_regular_par(&cols_to_rows, &v0, &mut work1);
+    mul_regular_par(cols_to_rows, &v0, &mut work1);
     mul_transpose_par(rows, &work1, &mut av0);
     let mut t0 = [0u64; 64];
     dot_par(&v0, &av0, &mut t0);
@@ -660,7 +657,7 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
         std::mem::swap(&mut v2, &mut v1);
         std::mem::swap(&mut v1, &mut v0);
         std::mem::swap(&mut v0, &mut ntmp);
-        mul_regular_par(&cols_to_rows, &v0, &mut work1);
+        mul_regular_par(cols_to_rows, &v0, &mut work1);
         mul_transpose_par(rows, &work1, &mut av0);
 
         // rotate the Winv and T history, recompute T0
@@ -669,8 +666,28 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
         std::mem::swap(&mut t1, &mut t0);
         dot_par(&v0, &av0, &mut t0);
     }
+    Some((x, v0))
+}
+
+/// Block Lanczos over GF(2): returns a set of dependencies (each a subset of relation
+/// indices whose rows XOR to the zero vector), the same contract as
+/// [`dense_left_null_space`]. Up to 64 independent dependencies are returned per call.
+///
+/// `seed` randomizes the starting block (Montgomery's algorithm is randomized); a
+/// fixed seed makes the result reproducible. Returns `None` if the inner breakdown
+/// occurs; `Some(deps)` otherwise (possibly empty — see [`block_lanczos_multipass`],
+/// which is robust against the empty/isotropic case when `dim ker(A) > 64`).
+pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option<Vec<Vec<usize>>> {
+    let n_r = rows.len();
+    let n_f = num_columns;
+    if n_r == 0 {
+        return Some(Vec::new());
+    }
+    let cols_to_rows = build_transpose(rows, n_f);
+    let (x, v0) = lanczos_iterate(rows, &cols_to_rows, n_r, n_f, seed)?;
 
     // extract kernel vectors of B from [X | V0]
+    let mut work1 = vec![0u64; n_f];
     let mut work2 = vec![0u64; n_f];
     mul_regular_par(&cols_to_rows, &x, &mut work1);
     mul_regular_par(&cols_to_rows, &v0, &mut work2);
@@ -685,6 +702,7 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
     }
     Some(deps)
 }
+
 
 impl SparseRelations {
     /// Dependencies via Block Lanczos (the production solver). Same contract as
@@ -724,22 +742,66 @@ impl SparseRelations {
         let kernel_expected = self.rows.len() > appearing;
 
         const TRIES: usize = 16;
+        let mut breakdowns = 0usize;
+        let mut empties = 0usize;
         for t in 0..TRIES as u64 {
             let s = seed ^ t.wrapping_mul(0x9E3779B97F4A7C15);
             match block_lanczos(&self.rows, self.num_columns, s) {
                 // success: a nonempty kernel was found
-                Some(deps) if !deps.is_empty() => return deps,
+                Some(deps) if !deps.is_empty() => {
+                    if t > 0 {
+                        eprintln!("[lanczos] succeeded on attempt {}/{TRIES}", t + 1);
+                    }
+                    return deps;
+                }
                 // completed with an empty kernel and none is expected: genuine
                 Some(_) if !kernel_expected => return Vec::new(),
-                // breakdown, or empty-but-a-kernel-is-expected: retry a fresh start
-                _ => continue,
+                // completed but empty though a kernel is expected: retry a fresh start
+                Some(_) => empties += 1,
+                // inner breakdown: retry a fresh start
+                None => breakdowns += 1,
             }
         }
-        // retries exhausted; a kernel must still exist, so use the exact solver
+        // every attempt failed though a kernel must exist. The dense solver is exact
+        // but sequential O(R·F·(R+F)/64) — minutes at scale — so warn loudly and (when
+        // SIQS_DUMP_MATRIX is set) dump the matrix so the failure can be reproduced.
+        eprintln!(
+            "[lanczos] all {TRIES} attempts failed on a {}×{} matrix \
+             ({breakdowns} breakdowns, {empties} empty); falling back to the SERIAL \
+             dense solver — this is single-threaded and may take many minutes",
+            self.rows.len(),
+            appearing,
+        );
+        self.dump_matrix_if_requested();
         if kernel_expected {
             return self.dependencies();
         }
         Vec::new()
+    }
+
+    // If the SIQS_DUMP_MATRIX env var is set, write the sparse rows to that path (one
+    // line per relation: space-separated column indices) so a failing Block Lanczos
+    // input can be captured and replayed in a test.
+    fn dump_matrix_if_requested(&self) {
+        let Ok(path) = std::env::var("SIQS_DUMP_MATRIX") else {
+            return;
+        };
+        use std::io::Write as _;
+        let mut out = String::new();
+        out.push_str(&format!("{} {}\n", self.rows.len(), self.num_columns));
+        for row in &self.rows {
+            for (i, c) in row.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                out.push_str(&c.to_string());
+            }
+            out.push('\n');
+        }
+        match std::fs::File::create(&path).and_then(|mut f| f.write_all(out.as_bytes())) {
+            Ok(()) => eprintln!("[lanczos] dumped relation matrix to {path}"),
+            Err(e) => eprintln!("[lanczos] failed to dump matrix to {path}: {e}"),
+        }
     }
 }
 
@@ -1041,6 +1103,56 @@ mod tests {
     }
 
     #[test]
+    fn block_lanczos_more_columns_than_relations() {
+        // The real QS case: n_f (primes) > n_r (relations), with the kernel coming
+        // from linear dependence among the relations (not from a wide matrix shape).
+        // All other BL tests have n_r > n_f, so this orientation was untested.
+        let mut seed = 0x0BADF00Du64;
+        let mut rng = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let n_f = 3000usize;
+        let independent = 1950usize;
+        let mut rows: Vec<Vec<u32>> = (0..independent)
+            .map(|_| {
+                let mut cols: Vec<u32> = (0..12).map(|_| (rng() % n_f as u64) as u32).collect();
+                cols.sort_unstable();
+                cols.dedup();
+                cols
+            })
+            .collect();
+        // add 50 rows that are XORs of two earlier rows => 50 forced dependencies
+        for _ in 0..50 {
+            let a = (rng() % independent as u64) as usize;
+            let b = (rng() % independent as u64) as usize;
+            let mut acc = vec![false; n_f];
+            for &c in &rows[a] {
+                acc[c as usize] ^= true;
+            }
+            for &c in &rows[b] {
+                acc[c as usize] ^= true;
+            }
+            rows.push((0..n_f as u32).filter(|&c| acc[c as usize]).collect());
+        }
+        let n_r = rows.len();
+        assert!(n_f > n_r, "want more columns than relations");
+        let nullity = n_r - gf2_rank(&rows, n_f);
+        assert!(nullity > 0, "constructed matrix should have a kernel");
+
+        let deps = block_lanczos(&rows, n_f, 0xC0FFEE).unwrap_or_default();
+        for dep in &deps {
+            assert!(rows_xor_to_zero(&rows, dep, n_f), "non-genuine dep");
+        }
+        assert!(
+            !deps.is_empty(),
+            "BL found no kernel for n_f={n_f} > n_r={n_r} (nullity={nullity})"
+        );
+    }
+
+    #[test]
     fn block_lanczos_high_nullity_returns_genuine_vectors() {
         // Mimic a real relation matrix: many factor-base columns never appear (empty
         // columns => low rank => nullity >> 64), and relations overlap heavily on a
@@ -1101,12 +1213,29 @@ mod tests {
             cols.dedup();
             sr.push_sparse(cols, (Integer::from(1), Integer::from(1)));
         }
-        for threads in [1usize, 2, 4, 8] {
+        eprintln!("--- from main thread ---");
+        for threads in [1usize, 8] {
             let start = Instant::now();
             let deps = sr.dependencies_lanczos(0xC0FFEE, threads);
             let elapsed = start.elapsed();
             eprintln!("threads={threads}: {elapsed:.2?}, {} deps", deps.len());
             assert!(!deps.is_empty());
+        }
+        // mimic the real call site: dependencies_lanczos is invoked from *inside* a
+        // rayon::scope spawned task (the collector), not the main thread. If the
+        // nested pool doesn't engage there, this will be ~as slow as 1 thread.
+        eprintln!("--- from within rayon::scope spawn ---");
+        for threads in [1usize, 8] {
+            let mut elapsed = std::time::Duration::ZERO;
+            rayon::scope(|s| {
+                s.spawn(|_| {
+                    let start = Instant::now();
+                    let deps = sr.dependencies_lanczos(0xC0FFEE, threads);
+                    elapsed = start.elapsed();
+                    assert!(!deps.is_empty());
+                });
+            });
+            eprintln!("threads={threads} (in scope): {elapsed:.2?}");
         }
     }
 
