@@ -1,4 +1,5 @@
 pub mod relations;
+pub mod linalg;
 pub mod siqs_generator;
 pub mod factorbase;
 pub mod multiplier;
