@@ -69,6 +69,96 @@ pub fn is_small_composite(n: &Integer) -> bool {
     SMALL_PRIMES.iter().any(|&p| *n != p && n.is_divisible_u(p))
 }
 
+// (a * b) mod m, using a 128-bit intermediate to avoid overflow.
+#[inline]
+fn mulmod_u64(a: u64, b: u64, m: u64) -> u64 {
+    ((a as u128 * b as u128) % m as u128) as u64
+}
+
+// a^e mod m
+fn powmod_u64(mut a: u64, mut e: u64, m: u64) -> u64 {
+    let mut result = 1u64 % m;
+    a %= m;
+    while e > 0 {
+        if e & 1 == 1 {
+            result = mulmod_u64(result, a, m);
+        }
+        a = mulmod_u64(a, a, m);
+        e >>= 1;
+    }
+    result
+}
+
+#[inline]
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
+}
+
+// Deterministic Miller–Rabin primality test for n < 2^64. The witness set
+// {2,3,5,7,11,13,17,19,23,29,31,37} is known to be correct for all n < 3.3 * 10^24.
+pub fn is_prime_u64(n: u64) -> bool {
+    const WITNESSES: [u64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
+    if n < 2 {
+        return false;
+    }
+    for &p in &WITNESSES {
+        if n % p == 0 {
+            return n == p;
+        }
+    }
+    // write n - 1 = d * 2^s with d odd
+    let mut d = n - 1;
+    let mut s = 0u32;
+    while d & 1 == 0 {
+        d >>= 1;
+        s += 1;
+    }
+    'witness: for &a in &WITNESSES {
+        let mut x = powmod_u64(a, d, n);
+        if x == 1 || x == n - 1 {
+            continue;
+        }
+        for _ in 0..s - 1 {
+            x = mulmod_u64(x, x, n);
+            if x == n - 1 {
+                continue 'witness;
+            }
+        }
+        return false;
+    }
+    true
+}
+
+// Pollard's rho: return a non-trivial divisor of the composite, odd `n`.
+// Used to split a double-large-prime cofactor (a product of two ~30-bit primes)
+// into its two prime factors; for such semiprimes this returns one of them.
+pub fn pollard_rho_u64(n: u64) -> u64 {
+    if n & 1 == 0 {
+        return 2;
+    }
+    // Floyd cycle detection on x -> x^2 + c (mod n); bump c on failure.
+    let mut c = 1u64;
+    loop {
+        let f = |x: u64| (mulmod_u64(x, x, n) + c) % n;
+        let (mut x, mut y, mut d) = (2u64, 2u64, 1u64);
+        while d == 1 {
+            x = f(x);
+            y = f(f(y));
+            let diff = if x > y { x - y } else { y - x };
+            d = gcd_u64(diff, n);
+        }
+        if d != n {
+            return d;
+        }
+        c += 1;
+    }
+}
+
 // compute a^2 (mod p)
 #[inline]
 pub fn square_mod_p(a: &Integer, p: &Integer) -> Integer {

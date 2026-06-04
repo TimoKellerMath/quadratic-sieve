@@ -6,8 +6,6 @@ use rug::Integer;
 
 use fixedbitset::FixedBitSet;
 
-use rustc_hash::FxHashMap;
-
 // debug_print! expands to nothing in release, leaving format_color unused there.
 #[allow(unused_imports)]
 use crate::debug_print;
@@ -53,6 +51,11 @@ pub fn quadratic_sieve_multithreaded(
     let logs = Arc::new(compute_logs(&factorbase));
     let factorbase = Arc::new(factorbase.clone());
     let kn_bits = kn.significant_bits();
+    // double large prime variation: only worthwhile for larger N, where non-smooth
+    // cofactors are big enough that admitting two large primes pays for the extra
+    // primality test / Pollard-rho split and the larger partial-relation graph.
+    let use_dlp = n.significant_bits() > 250;
+    println!("double large prime: {use_dlp}");
     let n = Arc::new(n);
     let kn = Arc::new(kn.clone());
     let found = Arc::new(AtomicBool::new(false));
@@ -68,31 +71,38 @@ pub fn quadratic_sieve_multithreaded(
             s.spawn(move |_| {
                 // set up matrix for relations over the factorbase
                 let mut relations = Relations::new(factorbase.len());
-                let mut big_prime_relations =
-                    FxHashMap::<u32, (FixedBitSet, Integer, Integer)>::default();
+                // combines (partial) relations into full ones: a single-prime hash map
+                // without the double large prime variation, the cycle graph with it
+                let mut partial_relations = PartialStore::new(use_dlp);
 
                 loop {
-                    let received: Result<(Integer, Integer, FixedBitSet, u32, usize), _> =
+                    let received: Result<(Integer, Integer, FixedBitSet, u32, u32, usize), _> =
                         receiver.recv();
                     // all producers have exited and dropped their senders: stop.
-                    let Ok((mut u, mut v, mut relation, big_prime, index_thread)) = received else {
+                    let Ok((u, v, relation, p, q, index_thread)) = received else {
                         return;
                     };
-                    // add relation, index, (u,v)
-                    if big_prime > 1 {
-                        if let Some((relation2, u2, v2)) = big_prime_relations.get(&big_prime) {
-                            relation ^= relation2;
-                            u *= u2;
-                            v *= v2;
-                            debug_print!("{}", format_color(":", index_thread));
-                        } else {
-                            big_prime_relations.insert(big_prime, (relation, u, v));
-                            debug_print!("{}", format_color(".", index_thread));
-                            continue;
-                        }
-                    } else {
+                    // full relations go straight to the matrix; partials (one or two
+                    // large primes) are routed through the partial-relation graph,
+                    // which yields a full relation only when it closes a cycle.
+                    let full = if p == 1 && q == 1 {
                         debug_print!("{}", format_color("+", index_thread));
-                    }
+                        Some((relation, u, v))
+                    } else {
+                        match partial_relations.add(relation, u, v, p, q) {
+                            Some(full) => {
+                                debug_print!("{}", format_color(":", index_thread));
+                                Some(full)
+                            }
+                            None => {
+                                debug_print!("{}", format_color(".", index_thread));
+                                None
+                            }
+                        }
+                    };
+                    let Some((relation, u, v)) = full else {
+                        continue;
+                    };
                     relations.add_relation(relation, (u, v));
                     // Gaussian elimination
                     if let Some(relation) = relations.gaussian_elimination() {
@@ -144,10 +154,20 @@ pub fn quadratic_sieve_multithreaded(
                         &mut next_pos,
                         BLOCK_SIZE,
                     );
-                    // threshold = log_2(kn/a) - log of largest prime - sum of small logs
+                    // threshold = log_2(kn/a) - large-prime slack - sum of small logs.
+                    // With the double large prime variation we allow two large primes,
+                    // so reserve extra slack — 1.5x the largest prime's log, a middle
+                    // ground between one prime's worth and a full two, admitting fewer
+                    // candidates than 2x while still catching most semiprime cofactors.
                     let log2_kn_over_a = kn_bits.saturating_sub(polynomial.a.significant_bits());
+                    let largest_log = *logs.last().unwrap() as u32;
+                    let lp_slack = if use_dlp {
+                        3 * largest_log / 2
+                    } else {
+                        largest_log
+                    };
                     let threshold: u8 = log2_kn_over_a
-                        .saturating_sub(*logs.last().unwrap() as u32)
+                        .saturating_sub(lp_slack)
                         .saturating_sub(sum_small_logs)
                         .min(u8::MAX as u32) as u8;
                     let total = logs_for_polynomial.len();
@@ -171,12 +191,12 @@ pub fn quadratic_sieve_multithreaded(
                                     let idx = i + j;
                                     let x = (idx as i32) - (sieve_interval_length as i32);
                                     let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
-                                    if let Some((relation, big_prime)) = factor_over_factorbase(
+                                    if let Some((relation, p, q)) = factor_over_factorbase(
                                         x, &v, &factorbase, roots, k, large_prime_multiplier,
-                                        &mut factor_scratch,
+                                        use_dlp, &mut factor_scratch,
                                     ) {
                                         if sender1
-                                            .send((u, v, relation, big_prime, index_thread))
+                                            .send((u, v, relation, p, q, index_thread))
                                             .is_err() {
                                             break 'outer_loop;
                                         }
@@ -191,12 +211,12 @@ pub fn quadratic_sieve_multithreaded(
                         if log >= threshold {
                             let x = (i as i32) - (sieve_interval_length as i32);
                             let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
-                            if let Some((relation, big_prime)) = factor_over_factorbase(
+                            if let Some((relation, p, q)) = factor_over_factorbase(
                                 x, &v, &factorbase, roots, k, large_prime_multiplier,
-                                &mut factor_scratch,
+                                use_dlp, &mut factor_scratch,
                             ) {
                                 if sender1
-                                    .send((u, v, relation, big_prime, index_thread))
+                                    .send((u, v, relation, p, q, index_thread))
                                     .is_err() {
                                     break 'outer_loop;
                                 }

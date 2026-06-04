@@ -1,7 +1,9 @@
+use crate::number_theory::{is_prime_u64, pollard_rho_u64};
 use crate::{constants::NUM_SKIP_PRIMES, polynomial_generator::Polynomial};
 use fixedbitset::FixedBitSet;
 use itertools::izip;
 use rug::{Assign, Complete, Integer};
+use rustc_hash::FxHashMap;
 use std::io::{self, Write};
 
 pub struct Relations {
@@ -121,7 +123,170 @@ impl Relations {
     }
 }
 
-// try to factor y = Q(x) over factorbase, using resieve: only divide by p if x ≡ root (mod p)
+/// An unordered set of at most two large primes attached to a (partial) relation.
+/// Empty slots are stored as 1 (no prime equals 1), with `a <= b` so the larger
+/// prime — the pivot used by [`PartialRelations`] — is always `b`.
+#[derive(Clone, Copy)]
+struct LargePrimes {
+    a: u32,
+    b: u32,
+}
+
+impl LargePrimes {
+    fn new(p: u32, q: u32) -> LargePrimes {
+        if p <= q {
+            LargePrimes { a: p, b: q }
+        } else {
+            LargePrimes { a: q, b: p }
+        }
+    }
+
+    // the largest prime in the set, or 1 if the set is empty
+    #[inline]
+    fn pivot(self) -> u32 {
+        self.b
+    }
+
+    // symmetric difference: primes appearing an odd number of times across the two
+    // sets. The two sets always share their pivot, so the result has at most two
+    // elements. Computed by odd-count over all four slots (order-independent: a
+    // running 2-slot toggle could transiently overflow before the shared pivot
+    // cancels).
+    fn symmetric_difference(self, other: LargePrimes) -> LargePrimes {
+        let vals = [self.a, self.b, other.a, other.b];
+        let mut out = [1u32; 2];
+        let mut len = 0usize;
+        for i in 0..vals.len() {
+            let x = vals[i];
+            // skip empty slots and values already emitted on an earlier index
+            if x == 1 || vals[..i].contains(&x) {
+                continue;
+            }
+            if vals.iter().filter(|&&y| y == x).count() % 2 == 1 {
+                if len < 2 {
+                    out[len] = x;
+                }
+                len += 1;
+            }
+        }
+        debug_assert!(len <= 2, "large-prime set exceeded two elements");
+        LargePrimes::new(out[0], out[1])
+    }
+}
+
+/// Combines partial relations (those left with one or two large primes after trial
+/// division) into full relations.
+///
+/// Each partial is an edge in a graph whose vertices are large primes; a full
+/// relation is a cycle, in which every large prime occurs an even number of times
+/// and therefore cancels. Cycles are detected incrementally by Gaussian elimination
+/// over GF(2): `reps[p]` holds a stored relation whose pivot (largest) large prime
+/// is `p`. A new partial is reduced against the stored relations, eliminating its
+/// pivot at each step (the pivot strictly decreases, so this terminates); if its
+/// prime set becomes empty it is a completed full relation, otherwise it becomes the
+/// representative for its remaining pivot.
+///
+/// The single-large-prime variation is the special case where every set has one
+/// element: two partials sharing a prime immediately reduce to a full relation.
+pub struct PartialRelations {
+    reps: FxHashMap<u32, (FixedBitSet, Integer, Integer, LargePrimes)>,
+}
+
+impl PartialRelations {
+    pub fn new() -> PartialRelations {
+        PartialRelations {
+            reps: FxHashMap::default(),
+        }
+    }
+
+    /// Feed a partial relation with large primes `p` and `q` (1 = none). Returns the
+    /// combined `(relation, u, v)` if it completes a full relation, else stores it.
+    pub fn add(
+        &mut self,
+        mut relation: FixedBitSet,
+        mut u: Integer,
+        mut v: Integer,
+        p: u32,
+        q: u32,
+    ) -> Option<(FixedBitSet, Integer, Integer)> {
+        let mut primes = LargePrimes::new(p, q);
+        loop {
+            let pivot = primes.pivot();
+            if pivot == 1 {
+                // no large primes left: this is a full relation
+                return Some((relation, u, v));
+            }
+            if let Some((relation2, u2, v2, primes2)) = self.reps.get(&pivot) {
+                // eliminate the pivot by multiplying with its representative; the
+                // shared pivot enters v squared, which find_factor handles as a square
+                relation ^= relation2;
+                u *= u2;
+                v *= v2;
+                primes = primes.symmetric_difference(*primes2);
+            } else {
+                // new pivot: store this relation as its representative
+                self.reps.insert(pivot, (relation, u, v, primes));
+                return None;
+            }
+        }
+    }
+}
+
+/// Storage for partial relations, selecting the cheapest scheme for the variation in
+/// use. With the double large prime variation disabled, partials carry a single large
+/// prime and are matched directly through a hash map (the original, lowest-overhead
+/// path). With it enabled, partials carry up to two large primes and are combined
+/// through the cycle-finding graph in [`PartialRelations`].
+pub enum PartialStore {
+    Single(FxHashMap<u32, (FixedBitSet, Integer, Integer)>),
+    Double(PartialRelations),
+}
+
+impl PartialStore {
+    pub fn new(use_dlp: bool) -> PartialStore {
+        if use_dlp {
+            PartialStore::Double(PartialRelations::new())
+        } else {
+            PartialStore::Single(FxHashMap::default())
+        }
+    }
+
+    /// Feed a partial relation with large primes `p` and `q` (1 = none; in the
+    /// single-prime path `q` is always 1). Returns the combined `(relation, u, v)`
+    /// once it completes a full relation, otherwise stores it and returns None.
+    pub fn add(
+        &mut self,
+        mut relation: FixedBitSet,
+        mut u: Integer,
+        mut v: Integer,
+        p: u32,
+        q: u32,
+    ) -> Option<(FixedBitSet, Integer, Integer)> {
+        match self {
+            // original single-large-prime hash map: two partials sharing the prime
+            // combine into a full relation; the first one is kept as the match.
+            PartialStore::Single(map) => {
+                debug_assert_eq!(q, 1);
+                if let Some((relation2, u2, v2)) = map.get(&p) {
+                    relation ^= relation2;
+                    u *= u2;
+                    v *= v2;
+                    Some((relation, u, v))
+                } else {
+                    map.insert(p, (relation, u, v));
+                    None
+                }
+            }
+            PartialStore::Double(graph) => graph.add(relation, u, v, p, q),
+        }
+    }
+}
+
+// try to factor y = Q(x) over factorbase, using resieve: only divide by p if x ≡ root (mod p).
+// On success returns the relation together with up to two large primes (1 = none):
+//   (relation, 1, 1)  full relation
+//   (relation, p, 1)  single-large-prime partial
+//   (relation, p, q)  double-large-prime partial (only produced when use_dlp is set)
 pub fn factor_over_factorbase(
     x: i32,
     y: &Integer,
@@ -129,8 +294,9 @@ pub fn factor_over_factorbase(
     roots: &[Option<(u32, u32)>],
     k: u32,
     large_prime_multiplier: u32,
+    use_dlp: bool,
     scratch: &mut Integer,
-) -> Option<(FixedBitSet, u32)> {
+) -> Option<(FixedBitSet, u32, u32)> {
     if y.is_zero() {
         return None;
     }
@@ -163,7 +329,7 @@ pub fn factor_over_factorbase(
             relation.set(i, true);
         }
         if *y_ == 1 {
-            return Some((relation, 1));
+            return Some((relation, 1, 1));
         }
     }
 
@@ -193,7 +359,7 @@ pub fn factor_over_factorbase(
                 relation.set(i, true);
             }
             if *y_ == 1 {
-                return Some((relation, 1));
+                return Some((relation, 1, 1));
             }
         }
         i += 1;
@@ -231,7 +397,7 @@ pub fn factor_over_factorbase(
                 relation.set(i, true);
             }
             if y_u64 == 1 {
-                return Some((relation, 1));
+                return Some((relation, 1, 1));
             }
         }
         i += 1;
@@ -239,20 +405,40 @@ pub fn factor_over_factorbase(
 
     // remainder y_u64 is 1 or prime
     if y_u64 == 1 {
-        return Some((relation, 1));
+        return Some((relation, 1, 1));
     }
     // locate prime in factorbase[i..] via binary search
     let largest_prime = *factorbase.last().unwrap() as u64;
     if y_u64 <= largest_prime {
         if let Ok(offset) = factorbase[i..].binary_search(&(y_u64 as u32)) {
             relation.toggle(i + offset);
-            return Some((relation, 1));
+            return Some((relation, 1, 1));
         }
     }
     debug_assert!(Integer::from(y_u64).gcd_u(k) == 1);
-    // big prime variation: small enough partial
-    if y_u64 < largest_prime * large_prime_multiplier as u64 {
-        return Some((relation, y_u64 as u32));
+    // large prime bound: largest_prime * lpm stays below 2^32, so a single large
+    // prime always fits in u32.
+    let lp_bound = largest_prime * large_prime_multiplier as u64;
+    // single large prime variation: y_u64 has no factor <= largest_prime, and
+    // lp_bound < largest_prime^2, so a value below lp_bound is necessarily prime.
+    if y_u64 < lp_bound {
+        return Some((relation, y_u64 as u32, 1));
+    }
+    // double large prime variation: y_u64 is a product of large primes (it survived
+    // trial division by the whole factor base). Accept it only if it splits into two
+    // primes, each below lp_bound, i.e. y_u64 is a semiprime <= lp_bound^2.
+    if use_dlp && y_u64 <= lp_bound * lp_bound && !is_prime_u64(y_u64) {
+        let p = pollard_rho_u64(y_u64);
+        let q = y_u64 / p;
+        if p <= lp_bound && q <= lp_bound && is_prime_u64(p) && is_prime_u64(q) {
+            if p == q {
+                // cofactor is a prime square: already a perfect square, so the large
+                // prime contributes nothing to the parity vector. This is a full
+                // relation (find_factor recovers p via the v product).
+                return Some((relation, 1, 1));
+            }
+            return Some((relation, p as u32, q as u32));
+        }
     }
     None
 }
