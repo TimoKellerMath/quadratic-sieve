@@ -9,6 +9,7 @@
 //! Block Lanczos implementation must agree with — not as the production solver.
 
 use fixedbitset::FixedBitSet;
+use rayon::prelude::*;
 use rug::{Complete, Integer};
 
 /// Relations stored sparsely for the batch linear-algebra phase: each relation keeps
@@ -208,21 +209,6 @@ pub fn dense_left_null_space(rows: &[Vec<u32>], num_columns: usize) -> Vec<Vec<u
 
 type Mat = [u64; 64];
 
-// out_f = B * in_r : out[p] = XOR over relations r containing prime p of in[r]
-fn mul_regular(rows: &[Vec<u32>], in_r: &[u64], out_f: &mut [u64]) {
-    for o in out_f.iter_mut() {
-        *o = 0;
-    }
-    for (r, cols) in rows.iter().enumerate() {
-        let v = in_r[r];
-        if v != 0 {
-            for &p in cols {
-                out_f[p as usize] ^= v;
-            }
-        }
-    }
-}
-
 // out_r = Bᵀ * in_f : out[r] = XOR over primes p in relation r of in[p]
 fn mul_transpose(rows: &[Vec<u32>], in_f: &[u64], out_r: &mut [u64]) {
     for (r, cols) in rows.iter().enumerate() {
@@ -270,6 +256,104 @@ fn mul(left: &[u64], right: &Mat, result: &mut [u64]) {
         }
         result[idx] = acc;
     }
+}
+
+// Below the parallel block ops fall back to serial: the rayon split + join overhead
+// isn't worth it for short vectors (and the small 64×64 `mul`/`dot` calls).
+const PAR_THRESHOLD: usize = 4096;
+
+// Parallel `mul_regular` over a column-major transpose index `cols_to_rows`, where
+// cols_to_rows[p] lists the relations containing prime p. Each output prime is an
+// independent XOR-reduction, so there is no write contention (unlike scattering over
+// the row-major `rows`, which would need per-thread accumulators).
+fn mul_regular_par(cols_to_rows: &[Vec<u32>], in_r: &[u64], out_f: &mut [u64]) {
+    if cols_to_rows.len() < PAR_THRESHOLD {
+        for (rs, o) in cols_to_rows.iter().zip(out_f.iter_mut()) {
+            let mut acc = 0u64;
+            for &r in rs {
+                acc ^= in_r[r as usize];
+            }
+            *o = acc;
+        }
+        return;
+    }
+    out_f
+        .par_iter_mut()
+        .zip(cols_to_rows.par_iter())
+        .for_each(|(o, rs)| {
+            let mut acc = 0u64;
+            for &r in rs {
+                acc ^= in_r[r as usize];
+            }
+            *o = acc;
+        });
+}
+
+// Parallel `mul_transpose`: each output relation is an independent XOR-reduction.
+fn mul_transpose_par(rows: &[Vec<u32>], in_f: &[u64], out_r: &mut [u64]) {
+    if rows.len() < PAR_THRESHOLD {
+        mul_transpose(rows, in_f, out_r);
+        return;
+    }
+    out_r
+        .par_iter_mut()
+        .zip(rows.par_iter())
+        .for_each(|(o, cols)| {
+            let mut acc = 0u64;
+            for &p in cols {
+                acc ^= in_f[p as usize];
+            }
+            *o = acc;
+        });
+}
+
+// Parallel `dot`: the result is XOR_k outer(left[k], right[k]); chunk over k, dot each
+// chunk serially, and XOR-combine the partial 64×64 matrices. Associativity of XOR
+// makes this bit-identical to the serial `dot` regardless of chunking or thread count.
+fn dot_par(left: &[u64], right: &[u64], result: &mut Mat) {
+    if left.len() < PAR_THRESHOLD {
+        dot(left, right, result);
+        return;
+    }
+    const CHUNK: usize = 2048;
+    *result = left
+        .par_chunks(CHUNK)
+        .zip(right.par_chunks(CHUNK))
+        .map(|(l, r)| {
+            let mut m = [0u64; 64];
+            dot(l, r, &mut m);
+            m
+        })
+        .reduce(
+            || [0u64; 64],
+            |mut a, b| {
+                for i in 0..64 {
+                    a[i] ^= b[i];
+                }
+                a
+            },
+        );
+}
+
+// Parallel `mul` where `right` is 64×64: each output row is independent.
+fn mul_par(left: &[u64], right: &Mat, result: &mut [u64]) {
+    if left.len() < PAR_THRESHOLD {
+        mul(left, right, result);
+        return;
+    }
+    result
+        .par_iter_mut()
+        .zip(left.par_iter())
+        .for_each(|(o, &l)| {
+            let mut bits = l;
+            let mut acc = 0u64;
+            while bits != 0 {
+                let b = bits.trailing_zeros() as usize;
+                acc ^= right[b];
+                bits &= bits - 1;
+            }
+            *o = acc;
+        });
 }
 
 // result = left ^ right
@@ -480,6 +564,15 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
         return Some(Vec::new());
     }
 
+    // column-major transpose index for the parallel `mul_regular`: cols_to_rows[p] is
+    // the list of relations containing prime p. Built once; reused every iteration.
+    let mut cols_to_rows: Vec<Vec<u32>> = vec![Vec::new(); n_f];
+    for (r, cols) in rows.iter().enumerate() {
+        for &p in cols {
+            cols_to_rows[p as usize].push(r as u32);
+        }
+    }
+
     // xorshift RNG for the random starting block Y (stored in `x`)
     let mut state = seed ^ 0x9E3779B97F4A7C15u64 ^ (n_r as u64).wrapping_mul(0x100000001B3);
     let mut rng = || {
@@ -500,13 +593,13 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
     let mut work1 = vec![0u64; n_f];
 
     // init: Q = A·Y ; V0 = Q ; AV0 = A·V0 ; T0 = V0ᵀ A V0
-    mul_regular(rows, &x, &mut work1);
-    mul_transpose(rows, &work1, &mut q);
+    mul_regular_par(&cols_to_rows, &x, &mut work1);
+    mul_transpose_par(rows, &work1, &mut q);
     v0.copy_from_slice(&q);
-    mul_regular(rows, &v0, &mut work1);
-    mul_transpose(rows, &work1, &mut av0);
+    mul_regular_par(&cols_to_rows, &v0, &mut work1);
+    mul_transpose_par(rows, &work1, &mut av0);
     let mut t0 = [0u64; 64];
-    dot(&v0, &av0, &mut t0);
+    dot_par(&v0, &av0, &mut t0);
 
     let mut t1 = [0u64; 64];
     let mut w0i = [0u64; 64];
@@ -529,9 +622,9 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
         }
 
         // X += V0 · (W0i · (V0ᵀ Q))      (solution accumulation, eq. 20)
-        dot(&v0, &q, &mut d);
+        dot_par(&v0, &q, &mut d);
         mul(&w0i, &d, &mut e);
-        mul(&v0, &e, &mut ntmp);
+        mul_par(&v0, &e, &mut ntmp);
         xor_assign(&mut x, &ntmp);
 
         // F coefficient (eq. 19): F = W2i·(T1·W1i + I)·G_prev, masked
@@ -546,7 +639,7 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
         and_mask(&mut e, mask);
 
         // G for the next iteration: G = (V0ᵀ A² V0 masked) ^ T0
-        dot(&av0, &av0, &mut d);
+        dot_par(&av0, &av0, &mut d);
         and_mask(&mut d, mask);
         rox(&d, &t0, &mut g);
 
@@ -556,31 +649,31 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
 
         // V_{i+1} = (A V0)·Sᵢ + V0·D + V1·E + V2·F      (eq. 18) -> ntmp
         and_mask(&mut av0, mask);
-        mul(&v0, &d, &mut workv);
+        mul_par(&v0, &d, &mut workv);
         rox(&av0, &workv, &mut ntmp);
-        mul(&v1, &e, &mut workv);
+        mul_par(&v1, &e, &mut workv);
         xor_assign(&mut ntmp, &workv);
-        mul(&v2, &f, &mut workv);
+        mul_par(&v2, &f, &mut workv);
         xor_assign(&mut ntmp, &workv);
 
         // rotate the V history and recompute A·V0
         std::mem::swap(&mut v2, &mut v1);
         std::mem::swap(&mut v1, &mut v0);
         std::mem::swap(&mut v0, &mut ntmp);
-        mul_regular(rows, &v0, &mut work1);
-        mul_transpose(rows, &work1, &mut av0);
+        mul_regular_par(&cols_to_rows, &v0, &mut work1);
+        mul_transpose_par(rows, &work1, &mut av0);
 
         // rotate the Winv and T history, recompute T0
         std::mem::swap(&mut w2i, &mut w1i);
         std::mem::swap(&mut w1i, &mut w0i);
         std::mem::swap(&mut t1, &mut t0);
-        dot(&v0, &av0, &mut t0);
+        dot_par(&v0, &av0, &mut t0);
     }
 
     // extract kernel vectors of B from [X | V0]
     let mut work2 = vec![0u64; n_f];
-    mul_regular(rows, &x, &mut work1);
-    mul_regular(rows, &v0, &mut work2);
+    mul_regular_par(&cols_to_rows, &x, &mut work1);
+    mul_regular_par(&cols_to_rows, &v0, &mut work2);
     let (nsols, result) = elimination(&work1, &work2, &x, &v0);
 
     let mut deps = Vec::new();
@@ -604,7 +697,21 @@ impl SparseRelations {
     /// there are more relations than primes that actually appear (rank ≤ appearing
     /// primes), so an empty result there is always a failure to retry, never a real
     /// answer. After exhausting retries we fall back to the exact dense solver.
-    pub fn dependencies_lanczos(&self, seed: u64) -> Vec<Vec<usize>> {
+    ///
+    /// The matrix–block products inside Block Lanczos run on a private rayon pool of
+    /// `num_threads` threads (so the solver's parallelism is independent of the global
+    /// pool the sieve uses). The GF(2) reductions are associative, so the result is
+    /// bit-identical to a single-threaded run with the same seed.
+    pub fn dependencies_lanczos(&self, seed: u64, num_threads: usize) -> Vec<Vec<usize>> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads.max(1))
+            .build()
+            .expect("failed to build Block Lanczos thread pool");
+        pool.install(|| self.dependencies_lanczos_pooled(seed))
+    }
+
+    // The retry loop; runs inside whatever rayon pool is installed by the caller.
+    fn dependencies_lanczos_pooled(&self, seed: u64) -> Vec<Vec<usize>> {
         // primes that actually occur; rank is bounded by this, so the kernel is
         // nonzero once we hold more relations than appearing primes.
         let mut appears = vec![false; self.num_columns];
@@ -972,6 +1079,35 @@ mod tests {
         let dep_vectors: Vec<Vec<u32>> =
             deps.iter().map(|d| d.iter().map(|&i| i as u32).collect()).collect();
         assert_eq!(gf2_rank(&dep_vectors, n_r), deps.len(), "deps not independent");
+    }
+
+    #[test]
+    #[ignore = "benchmark: run with --ignored --nocapture"]
+    fn block_lanczos_thread_scaling() {
+        use std::time::Instant;
+        let mut seed = 0xABCD_1234u64;
+        let mut rng = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let n_f = 20000usize;
+        let n_r = n_f + 192;
+        let mut sr = SparseRelations::new(n_f);
+        for _ in 0..n_r {
+            let mut cols: Vec<u32> = (0..24).map(|_| (rng() % n_f as u64) as u32).collect();
+            cols.sort_unstable();
+            cols.dedup();
+            sr.push_sparse(cols, (Integer::from(1), Integer::from(1)));
+        }
+        for threads in [1usize, 2, 4, 8] {
+            let start = Instant::now();
+            let deps = sr.dependencies_lanczos(0xC0FFEE, threads);
+            let elapsed = start.elapsed();
+            eprintln!("threads={threads}: {elapsed:.2?}, {} deps", deps.len());
+            assert!(!deps.is_empty());
+        }
     }
 
     #[test]

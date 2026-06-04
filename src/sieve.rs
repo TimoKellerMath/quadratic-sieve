@@ -484,7 +484,7 @@ pub fn quadratic_sieve_lanczos(
                     sparse.len()
                 );
                 io::stdout().flush().unwrap();
-                let dependencies = sparse.dependencies_lanczos(LANCZOS_SEED);
+                let dependencies = sparse.dependencies_lanczos(LANCZOS_SEED, num_threads + 1);
                 println!("Block Lanczos returned {} dependencies", dependencies.len());
                 for dependency in &dependencies {
                     if let Some(factor) = sparse.find_factor(dependency, &n) {
