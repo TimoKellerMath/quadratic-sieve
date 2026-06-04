@@ -140,6 +140,11 @@ pub fn quadratic_sieve_multithreaded(
                 let mut next_pos: Vec<usize> = Vec::with_capacity(2 * factorbase.len());
                 // scratch integer reused by factor_over_factorbase per candidate
                 let mut factor_scratch = Integer::new();
+                // scratch bitset reused across candidates (cloned out only on a hit)
+                let mut relation_scratch = FixedBitSet::with_capacity(factorbase.len());
+                // scratch (u, v) reused across candidates; cloned out only on a hit
+                let mut u_scratch = Integer::new();
+                let mut v_scratch = Integer::new();
 
                 'outer_loop: loop {
                     if found.load(Ordering::Relaxed) {
@@ -193,13 +198,19 @@ pub fn quadratic_sieve_multithreaded(
                                     m &= m - 1;
                                     let idx = i + j;
                                     let x = (idx as i32) - (sieve_interval_length as i32);
-                                    let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
+                                    evaluate_polynomial_at(
+                                        x, &polynomial, &kn, &mut u_scratch, &mut v_scratch,
+                                    );
                                     if let Some((relation, p, q)) = factor_over_factorbase(
-                                        x, &v, &factorbase, roots, &reciprocals, k,
+                                        x, &v_scratch, &factorbase, roots, &reciprocals, k,
                                         large_prime_multiplier, use_dlp, &mut factor_scratch,
+                                        &mut relation_scratch,
                                     ) {
                                         if sender1
-                                            .send((u, v, relation, p, q, index_thread))
+                                            .send((
+                                                u_scratch.clone(), v_scratch.clone(),
+                                                relation, p, q, index_thread,
+                                            ))
                                             .is_err() {
                                             break 'outer_loop;
                                         }
@@ -213,13 +224,19 @@ pub fn quadratic_sieve_multithreaded(
                         let log = logs_for_polynomial[i];
                         if log >= threshold {
                             let x = (i as i32) - (sieve_interval_length as i32);
-                            let (u, v) = evaluate_polynomial_at(x, &polynomial, &kn);
+                            evaluate_polynomial_at(
+                                x, &polynomial, &kn, &mut u_scratch, &mut v_scratch,
+                            );
                             if let Some((relation, p, q)) = factor_over_factorbase(
-                                x, &v, &factorbase, roots, &reciprocals, k,
+                                x, &v_scratch, &factorbase, roots, &reciprocals, k,
                                 large_prime_multiplier, use_dlp, &mut factor_scratch,
+                                &mut relation_scratch,
                             ) {
                                 if sender1
-                                    .send((u, v, relation, p, q, index_thread))
+                                    .send((
+                                        u_scratch.clone(), v_scratch.clone(),
+                                        relation, p, q, index_thread,
+                                    ))
                                     .is_err() {
                                     break 'outer_loop;
                                 }

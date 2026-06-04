@@ -316,6 +316,7 @@ pub fn factor_over_factorbase(
     large_prime_multiplier: u32,
     use_dlp: bool,
     scratch: &mut Integer,
+    relation_scratch: &mut FixedBitSet,
 ) -> Option<(FixedBitSet, u32, u32)> {
     if y.is_zero() {
         return None;
@@ -324,7 +325,11 @@ pub fn factor_over_factorbase(
     // candidate; assign reuses scratch's existing allocation.
     let y_ = scratch;
     y_.assign(y);
-    let mut relation = FixedBitSet::with_capacity(factorbase.len());
+    // Reuse the caller-owned bitset (capacity == factorbase.len()) rather than
+    // allocating one per candidate: most candidates fail, so this avoids a hot
+    // alloc/zero/free; the rare successful relation is cloned out at the return.
+    let relation = relation_scratch;
+    relation.clear();
     // -1 in factorbase
     if y_.is_negative() {
         relation.set(0, true);
@@ -349,7 +354,7 @@ pub fn factor_over_factorbase(
             relation.set(i, true);
         }
         if *y_ == 1 {
-            return Some((relation, 1, 1));
+            return Some((relation.clone(), 1, 1));
         }
     }
 
@@ -382,7 +387,7 @@ pub fn factor_over_factorbase(
                 relation.set(i, true);
             }
             if *y_ == 1 {
-                return Some((relation, 1, 1));
+                return Some((relation.clone(), 1, 1));
             }
         }
         i += 1;
@@ -420,7 +425,7 @@ pub fn factor_over_factorbase(
                 relation.set(i, true);
             }
             if y_u64 == 1 {
-                return Some((relation, 1, 1));
+                return Some((relation.clone(), 1, 1));
             }
         }
         i += 1;
@@ -428,14 +433,14 @@ pub fn factor_over_factorbase(
 
     // remainder y_u64 is 1 or prime
     if y_u64 == 1 {
-        return Some((relation, 1, 1));
+        return Some((relation.clone(), 1, 1));
     }
     // locate prime in factorbase[i..] via binary search
     let largest_prime = *factorbase.last().unwrap() as u64;
     if y_u64 <= largest_prime {
         if let Ok(offset) = factorbase[i..].binary_search(&(y_u64 as u32)) {
             relation.toggle(i + offset);
-            return Some((relation, 1, 1));
+            return Some((relation.clone(), 1, 1));
         }
     }
     debug_assert!(Integer::from(y_u64).gcd_u(k) == 1);
@@ -445,7 +450,7 @@ pub fn factor_over_factorbase(
     // single large prime variation: y_u64 has no factor <= largest_prime, and
     // lp_bound < largest_prime^2, so a value below lp_bound is necessarily prime.
     if y_u64 < lp_bound {
-        return Some((relation, y_u64 as u32, 1));
+        return Some((relation.clone(), y_u64 as u32, 1));
     }
     // double large prime variation: y_u64 is a product of large primes (it survived
     // trial division by the whole factor base). Accept it only if it splits into two
@@ -465,9 +470,9 @@ pub fn factor_over_factorbase(
                 // cofactor is a prime square: already a perfect square, so the large
                 // prime contributes nothing to the parity vector. This is a full
                 // relation (find_factor recovers p via the v product).
-                return Some((relation, 1, 1));
+                return Some((relation.clone(), 1, 1));
             }
-            return Some((relation, p as u32, q as u32));
+            return Some((relation.clone(), p as u32, q as u32));
         }
     }
     None
@@ -631,24 +636,31 @@ pub fn sieve_over_factorbase_blocked(
     logs[..NUM_SKIP_PRIMES].iter().map(|&l| l as u32).sum::<u32>()
 }
 
-// compute (u,y) with u^2 = v (n)
+// compute (u,y) with u^2 = v (n), writing into the caller-owned `u` and `y` so their
+// allocations are reused across candidates instead of allocating a fresh pair per
+// survivor (the common case is a non-relation, where the result is just discarded).
 // y = ((a x + b) + b) * x + c = ax^2 + 2bx + c = Q(x) = ((qx + b)^2 - n)/q
 // u = (qx + b) * q^-1 (n)
-pub fn evaluate_polynomial_at(x: i32, polynomial: &Polynomial, n: &Integer) -> (Integer, Integer) {
-    let mut y = (polynomial.a * x + &polynomial.b).complete();
+pub fn evaluate_polynomial_at(
+    x: i32,
+    polynomial: &Polynomial,
+    n: &Integer,
+    u: &mut Integer,
+    y: &mut Integer,
+) {
+    y.assign(polynomial.a * x + &polynomial.b);
     // u = qx + b
-    let mut u = y.clone();
-    y += &polynomial.b;
-    y *= x;
-    y += &polynomial.c; // y = ux + c = qx^2 + 2bx + c = qx^2 + 2bx + (b^2-n)/q^2
+    u.assign(&*y);
+    *y += &polynomial.b;
+    *y *= x;
+    *y += &polynomial.c; // y = ux + c = qx^2 + 2bx + c = qx^2 + 2bx + (b^2-n)/q^2
     // qy = (qx)^2 + 2b(qx) + (b^2-n)/q = (qx+b)^2 - b^2 + qc = u^2 - (b^2 + qc)
     debug_assert_eq!(y.clone() * polynomial.a, u.clone().square() - n);
     // u = (qx+b)/q = x + b/q (mod n)
-    u *= polynomial.q_inverse;
-    u %= n;
+    *u *= polynomial.q_inverse;
+    *u %= n;
     // (u/q)^2 = x^2 + 2bx/q + (b^2/q^2) =!= y = qx^2 + 2bx + c (mod n)
     debug_assert!((u.clone().square() - y.clone()).is_divisible(n));
-    (u, y)
 }
 
 #[cfg(test)]
