@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use rug::Integer;
 
@@ -238,6 +239,10 @@ pub fn quadratic_sieve_multithreaded(
                 // combines (partial) relations into full ones: a single-prime hash map
                 // without the double large prime variation, the cycle graph with it
                 let mut partial_relations = PartialStore::new(use_dlp);
+                // time each 10% progress step (same step as add_relation's `(k)` report)
+                // and flag the slow ones. `step` mirrors Relations::add_relation.
+                let progress_step = (factorbase.len() / 10).max(1);
+                let mut last_step_time = Instant::now();
 
                 loop {
                     let received: Result<(Integer, Integer, FixedBitSet, u32, u32, usize), _> =
@@ -268,6 +273,16 @@ pub fn quadratic_sieve_multithreaded(
                         continue;
                     };
                     relations.add_relation(relation, (u, v));
+                    // when a 10% step boundary is crossed, report its time if it was slow
+                    let count = relations.len();
+                    if count.is_multiple_of(progress_step) {
+                        let elapsed = last_step_time.elapsed();
+                        if elapsed > Duration::from_secs(5) {
+                            print!("({} {} ms)", count / progress_step, elapsed.as_millis());
+                            io::stdout().flush().unwrap();
+                        }
+                        last_step_time = Instant::now();
+                    }
                     // Gaussian elimination
                     if let Some(relation) = relations.gaussian_elimination() {
                         debug_print!("{}", format_color("!", index_thread));
@@ -435,6 +450,15 @@ pub fn quadratic_sieve_lanczos(
                 let mut appeared = vec![false; factorbase.len()];
                 let mut appeared_count = 0usize;
 
+                // progress: report every 10% of the (estimated) max relations needed.
+                // The actual target is appeared_count + RELATION_SURPLUS; appeared_count
+                // is bounded by the factor base, so this is the upper bound.
+                let max_relations = factorbase.len() + RELATION_SURPLUS;
+                let progress_step = (max_relations / 10).max(1);
+                let collection_start = Instant::now();
+                // time each 10% step so slow ones can be flagged
+                let mut last_step_time = collection_start;
+
                 loop {
                     // enough once we hold RELATION_SURPLUS more distinct relations than
                     // distinct primes appearing — then the kernel is at least that big.
@@ -471,6 +495,13 @@ pub fn quadratic_sieve_lanczos(
                                 }
                             }
                             sparse.push_sparse(cols, (u, v));
+                            if sparse.len().is_multiple_of(progress_step) {
+                                let step = sparse.len() / progress_step;
+                                let elapsed = last_step_time.elapsed();
+                                print!("({step}: {} ms)", elapsed.as_millis());
+                                io::stdout().flush().unwrap();
+                                last_step_time = Instant::now();
+                            }
                         }
                     }
                 }
@@ -478,14 +509,21 @@ pub fn quadratic_sieve_lanczos(
                 // then run the linear algebra.
                 found.store(true, Ordering::Relaxed);
                 drop(receiver);
+                let collection_time = collection_start.elapsed();
                 println!(
-                    "\ncollected {} distinct relations ({appeared_count} primes appearing); \
-                     running Block Lanczos…",
-                    sparse.len()
+                    "\ncollected {} distinct relations ({appeared_count} primes appearing) \
+                     in {collection_time:.2?}; running Block Lanczos with {} threads…",
+                    sparse.len(),
+                    num_threads + 1
                 );
                 io::stdout().flush().unwrap();
+                let lanczos_start = Instant::now();
                 let dependencies = sparse.dependencies_lanczos(LANCZOS_SEED, num_threads + 1);
-                println!("Block Lanczos returned {} dependencies", dependencies.len());
+                let lanczos_time = lanczos_start.elapsed();
+                println!(
+                    "Block Lanczos returned {} dependencies in {lanczos_time:.2?}",
+                    dependencies.len()
+                );
                 for dependency in &dependencies {
                     if let Some(factor) = sparse.find_factor(dependency, &n) {
                         println!("found factor: {factor}");
