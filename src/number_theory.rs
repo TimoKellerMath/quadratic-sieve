@@ -255,24 +255,59 @@ pub fn is_probable_prime_base2(n: u64) -> bool {
 // Pollard's rho: return a non-trivial divisor of the composite, odd `n`.
 // Used to split a double-large-prime cofactor (a product of two ~30-bit primes)
 // into its two prime factors; for such semiprimes this returns one of them.
+//
+// Brent's variant of the cycle search (one f-evaluation per step instead of
+// Floyd's three) with the gcd batched: the per-step differences are accumulated
+// into a single Montgomery product and only `gcd(product, n)` is taken once per
+// `BATCH` steps. gcd(product, n) is unchanged by the Montgomery form because
+// gcd(R, n) = 1, so the returned divisor is a genuine factor of n.
 pub fn pollard_rho_u64(n: u64) -> u64 {
     if n & 1 == 0 {
         return 2;
     }
-    // Floyd cycle detection on x -> x^2 + c (mod n), carried out in Montgomery form;
-    // bump c on failure. gcd(diff, n) is unchanged by the Montgomery form, so the
-    // returned divisor is a genuine factor of n.
+    const BATCH: usize = 128;
     let mont = Montgomery::new(n);
     let two = mont.to_mont(2);
     let mut c = mont.one; // Montgomery form of c, starting at 1
     loop {
         let f = |x: u64| mont.add(mont.mul(x, x), c);
-        let (mut x, mut y, mut d) = (two, two, 1u64);
+        let mut y = two;
+        let mut x = two; // checkpoint: y's value at the start of the current round
+        let mut ys = two; // y's value at the start of the current batch (for backtracking)
+        let mut q = mont.one; // running product of |x - y|, Montgomery form of 1
+        let mut d = 1u64;
+        let mut r = 1usize; // round length, doubling each round (Brent)
         while d == 1 {
-            x = f(x);
-            y = f(f(y));
-            let diff = if x >= y { x - y } else { y - x };
-            d = gcd_u64(diff, n);
+            x = y;
+            for _ in 0..r {
+                y = f(y);
+            }
+            let mut k = 0;
+            while k < r && d == 1 {
+                ys = y;
+                let count = BATCH.min(r - k);
+                for _ in 0..count {
+                    y = f(y);
+                    let diff = if x >= y { x - y } else { y - x };
+                    q = mont.mul(q, diff); // 0 once the cycle closes (x == y)
+                }
+                d = gcd_u64(q, n);
+                k += count;
+            }
+            r *= 2;
+        }
+        if d == n {
+            // a batch product hit all of n (the cycle closed within it): re-walk the
+            // last batch one step at a time to isolate which difference carried the
+            // factor. If even that yields n, this c failed — bump it and retry.
+            loop {
+                ys = f(ys);
+                let diff = if x >= ys { x - ys } else { ys - x };
+                d = gcd_u64(diff, n);
+                if d != 1 {
+                    break;
+                }
+            }
         }
         if d != n {
             return d;
@@ -609,6 +644,22 @@ mod tests {
         for &n in &cases {
             let d = pollard_rho_u64(n);
             assert!(d > 1 && d < n && n % d == 0, "pollard_rho_u64({n}) = {d}");
+        }
+
+        // stress: every product of two distinct small primes. Small factors make the
+        // cycle close quickly, exercising the batch-overshoot backtrack path.
+        for (i, &p) in SMALL_PRIMES.iter().enumerate() {
+            if p == 2 {
+                continue; // odd composites only
+            }
+            for &qf in SMALL_PRIMES.iter().skip(i + 1) {
+                if qf == 2 {
+                    continue;
+                }
+                let n = p as u64 * qf as u64;
+                let d = pollard_rho_u64(n);
+                assert!(d > 1 && d < n && n % d == 0, "pollard_rho_u64({n}) = {d}");
+            }
         }
     }
 
