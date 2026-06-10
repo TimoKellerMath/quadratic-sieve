@@ -609,9 +609,16 @@ fn lanczos_iterate(
     let mut left = [0u64; 64];
     let mut mask = u64::MAX;
 
+    // env-gated diagnostic: sum of selected columns per iteration = rank(A), so
+    // n_r - rank(A) = dim ker(A) — the quantity that decides whether a 64-wide
+    // block can capture the kernel at all.
+    let debug = std::env::var("SIQS_BL_DEBUG").is_ok();
+    let mut rank_a = 0usize;
+
     while nonzero(&t0) {
         let mask_prev = mask;
         mask = invert(&t0, mask, &mut left, &mut w0i);
+        rank_a += mask.count_ones() as usize;
         let unselected = !(mask | mask_prev);
         if unselected != 0 && nonzero_masked(&v1, unselected) {
             // inner breakdown: columns in neither Sᵢ nor Sᵢ₋₁ but V₍ᵢ₋₁₎ nonzero there
@@ -666,6 +673,12 @@ fn lanczos_iterate(
         std::mem::swap(&mut t1, &mut t0);
         dot_par(&v0, &av0, &mut t0);
     }
+    if debug {
+        eprintln!(
+            "[bl-debug] n_r={n_r} rank(A)={rank_a} dim_ker(A)={}",
+            n_r - rank_a
+        );
+    }
     Some((x, v0))
 }
 
@@ -675,8 +688,10 @@ fn lanczos_iterate(
 ///
 /// `seed` randomizes the starting block (Montgomery's algorithm is randomized); a
 /// fixed seed makes the result reproducible. Returns `None` if the inner breakdown
-/// occurs; `Some(deps)` otherwise (possibly empty — see [`block_lanczos_multipass`],
-/// which is robust against the empty/isotropic case when `dim ker(A) > 64`).
+/// occurs; `Some(deps)` otherwise. Caveat: when `dim ker(BᵀB) > 64` (a large GF(2)
+/// isotropic radical), the 64-wide block can land entirely in the isotropic part and
+/// the result is empty even though `ker(B)` is nonzero — retries do not help; the
+/// matrix needs filtering or a wider block.
 pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option<Vec<Vec<usize>>> {
     let n_r = rows.len();
     let n_f = num_columns;
@@ -704,6 +719,41 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
 }
 
 
+/// Iteratively drop relations containing a prime that appears in exactly one
+/// surviving relation. Such a relation can never participate in a dependency — its
+/// unique prime has nothing to cancel against — so the left null space is unchanged
+/// (inductively, as removals expose new singletons). Returns the indices of the
+/// surviving relations.
+///
+/// This is not just a size optimization: singleton chains are exactly the structure
+/// that traps the 64-wide Block Lanczos block in the isotropic radical of BᵀB
+/// (observed on a real 31647×32412 QS matrix: unfiltered, every start returned an
+/// empty kernel; filtered, every start returned 64 genuine dependencies).
+fn filter_singletons(rows: &[Vec<u32>], num_columns: usize) -> Vec<u32> {
+    let mut alive = vec![true; rows.len()];
+    loop {
+        let mut count = vec![0u32; num_columns];
+        for (r, cols) in rows.iter().enumerate() {
+            if alive[r] {
+                for &c in cols {
+                    count[c as usize] += 1;
+                }
+            }
+        }
+        let mut removed = false;
+        for (r, cols) in rows.iter().enumerate() {
+            if alive[r] && cols.iter().any(|&c| count[c as usize] == 1) {
+                alive[r] = false;
+                removed = true;
+            }
+        }
+        if !removed {
+            break;
+        }
+    }
+    (0..rows.len() as u32).filter(|&r| alive[r as usize]).collect()
+}
+
 impl SparseRelations {
     /// Dependencies via Block Lanczos (the production solver). Same contract as
     /// [`SparseRelations::dependencies`] but O(weight·R/64) per iteration instead of
@@ -728,31 +778,45 @@ impl SparseRelations {
         pool.install(|| self.dependencies_lanczos_pooled(seed))
     }
 
-    // The retry loop; runs inside whatever rayon pool is installed by the caller.
+    // The filter + retry loop; runs inside whatever rayon pool is installed by the
+    // caller.
     fn dependencies_lanczos_pooled(&self, seed: u64) -> Vec<Vec<usize>> {
-        // primes that actually occur; rank is bounded by this, so the kernel is
-        // nonzero once we hold more relations than appearing primes.
+        // Remove singleton relations first (see filter_singletons): they cannot be
+        // part of any dependency, and their chains are what traps the 64-wide block
+        // in the isotropic radical, making Lanczos return an empty kernel.
+        let keep = filter_singletons(&self.rows, self.num_columns);
+        let filtered: Vec<Vec<u32>> = keep.iter().map(|&r| self.rows[r as usize].clone()).collect();
+
+        // primes that actually occur in the filtered set; rank is bounded by this, so
+        // the kernel is nonzero once there are more relations than appearing primes.
         let mut appears = vec![false; self.num_columns];
-        for row in &self.rows {
+        for row in &filtered {
             for &c in row {
                 appears[c as usize] = true;
             }
         }
         let appearing = appears.iter().filter(|&&a| a).count();
-        let kernel_expected = self.rows.len() > appearing;
+        let kernel_expected = filtered.len() > appearing;
+
+        // map a dependency over the filtered rows back to original relation indices
+        let remap = |deps: Vec<Vec<usize>>| -> Vec<Vec<usize>> {
+            deps.into_iter()
+                .map(|dep| dep.into_iter().map(|i| keep[i] as usize).collect())
+                .collect()
+        };
 
         const TRIES: usize = 16;
         let mut breakdowns = 0usize;
         let mut empties = 0usize;
         for t in 0..TRIES as u64 {
             let s = seed ^ t.wrapping_mul(0x9E3779B97F4A7C15);
-            match block_lanczos(&self.rows, self.num_columns, s) {
+            match block_lanczos(&filtered, self.num_columns, s) {
                 // success: a nonempty kernel was found
                 Some(deps) if !deps.is_empty() => {
                     if t > 0 {
                         eprintln!("[lanczos] succeeded on attempt {}/{TRIES}", t + 1);
                     }
-                    return deps;
+                    return remap(deps);
                 }
                 // completed with an empty kernel and none is expected: genuine
                 Some(_) if !kernel_expected => return Vec::new(),
@@ -769,12 +833,12 @@ impl SparseRelations {
             "[lanczos] all {TRIES} attempts failed on a {}×{} matrix \
              ({breakdowns} breakdowns, {empties} empty); falling back to the SERIAL \
              dense solver — this is single-threaded and may take many minutes",
-            self.rows.len(),
+            filtered.len(),
             appearing,
         );
         self.dump_matrix_if_requested();
         if kernel_expected {
-            return self.dependencies();
+            return remap(dense_left_null_space(&filtered, self.num_columns));
         }
         Vec::new()
     }
@@ -1236,6 +1300,93 @@ mod tests {
                 });
             });
             eprintln!("threads={threads} (in scope): {elapsed:.2?}");
+        }
+    }
+
+    #[test]
+    fn filter_singletons_preserves_null_space() {
+        let mut seed = 0xFEED_FACEu64;
+        let mut rng = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let n_f = 400usize;
+        // base rows over the first 300 columns, plus rows carrying unique primes
+        // (singletons) in 300.., some chained (row only removable after another)
+        let mut rows: Vec<Vec<u32>> = (0..320)
+            .map(|_| {
+                let mut cols: Vec<u32> = (0..8).map(|_| (rng() % 300) as u32).collect();
+                cols.sort_unstable();
+                cols.dedup();
+                cols
+            })
+            .collect();
+        for i in 0..50u32 {
+            // rows 320..370: each carries unique prime 300+i — removable round 1
+            let mut cols: Vec<u32> = (0..6).map(|_| (rng() % 300) as u32).collect();
+            cols.push(300 + i);
+            cols.sort_unstable();
+            cols.dedup();
+            rows.push(cols);
+        }
+        // a 2-chain: row A has primes {350, 351}, row B has {351}; B's removal makes
+        // 350 a singleton only after A... (i.e. A has {398, 399}, B has {399, x})
+        rows.push(vec![5, 398, 399]);
+        rows.push(vec![7, 399]);
+
+        let keep = filter_singletons(&rows, n_f);
+        let filtered: Vec<Vec<u32>> = keep.iter().map(|&r| rows[r as usize].clone()).collect();
+        assert!(filtered.len() < rows.len(), "nothing was filtered");
+
+        // null space must be identical: same number of dependencies, and every
+        // dependency of the filtered matrix is a dependency of the original (after
+        // remapping), and vice versa (compare via counts + genuineness).
+        let deps_full = dense_left_null_space(&rows, n_f);
+        let deps_filt = dense_left_null_space(&filtered, n_f);
+        assert_eq!(deps_full.len(), deps_filt.len(), "nullity changed by filtering");
+        for dep in &deps_filt {
+            let remapped: Vec<usize> = dep.iter().map(|&i| keep[i] as usize).collect();
+            assert!(rows_xor_to_zero(&rows, &remapped, n_f));
+        }
+        // no dependency of the original may involve a filtered-out row
+        let kept: std::collections::HashSet<usize> =
+            keep.iter().map(|&r| r as usize).collect();
+        for dep in &deps_full {
+            assert!(
+                dep.iter().all(|r| kept.contains(r)),
+                "a dependency used a singleton relation"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "needs src/bin/lanczos_matrix.txt (2MB dump of the failing 251-bit matrix)"]
+    fn lanczos_real_251_bit_matrix_regression() {
+        // The matrix on which unfiltered Block Lanczos returned an empty kernel for
+        // every start (isotropic-radical trap). With singleton filtering inside
+        // dependencies_lanczos this must now produce genuine dependencies, fast.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/lanczos_matrix.txt");
+        let text = std::fs::read_to_string(path).expect("matrix dump present");
+        let mut lines = text.lines();
+        let mut header = lines.next().unwrap().split_whitespace();
+        let n_r: usize = header.next().unwrap().parse().unwrap();
+        let n_f: usize = header.next().unwrap().parse().unwrap();
+        let mut sr = SparseRelations::new(n_f);
+        for l in lines {
+            let cols: Vec<u32> = l.split_whitespace().map(|x| x.parse().unwrap()).collect();
+            sr.push_sparse(cols, (Integer::from(1), Integer::from(1)));
+        }
+        assert_eq!(sr.len(), n_r);
+
+        let deps = sr.dependencies_lanczos(0x5161_7A9F_2C3D_4E5F, 8);
+        assert!(!deps.is_empty(), "lanczos found no dependencies on the real matrix");
+        for dep in &deps {
+            assert!(
+                rows_xor_to_zero(sr.rows(), dep, n_f),
+                "non-genuine dependency on the real matrix"
+            );
         }
     }
 

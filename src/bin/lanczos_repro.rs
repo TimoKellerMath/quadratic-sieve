@@ -74,6 +74,87 @@ fn main() {
     let n_r = rows.len();
     println!("loaded {n_r} relations x {n_f} columns");
 
+    // SIQS_FILTER=1: iteratively remove singleton relations (those containing a prime
+    // that appears in exactly one surviving relation — such a relation can never be
+    // part of a dependency, since nothing can cancel that prime), then run Block
+    // Lanczos on the filtered matrix.
+    if std::env::var("SIQS_FILTER").is_ok() {
+        let mut alive: Vec<bool> = vec![true; rows.len()];
+        let mut round = 0usize;
+        loop {
+            round += 1;
+            let mut count = vec![0u32; n_f];
+            for (r, cols) in rows.iter().enumerate() {
+                if alive[r] {
+                    for &c in cols {
+                        count[c as usize] += 1;
+                    }
+                }
+            }
+            let mut removed = 0usize;
+            for (r, cols) in rows.iter().enumerate() {
+                if alive[r] && cols.iter().any(|&c| count[c as usize] == 1) {
+                    alive[r] = false;
+                    removed += 1;
+                }
+            }
+            let live = alive.iter().filter(|&&a| a).count();
+            println!("filter round {round}: removed {removed}, {live} remain");
+            if removed == 0 {
+                break;
+            }
+        }
+        let filtered: Vec<Vec<u32>> = rows
+            .iter()
+            .zip(&alive)
+            .filter(|(_, a)| **a)
+            .map(|(r, _)| r.clone())
+            .collect();
+        let appearing = {
+            let mut seen = vec![false; n_f];
+            for cols in &filtered {
+                for &c in cols {
+                    seen[c as usize] = true;
+                }
+            }
+            seen.iter().filter(|&&s| s).count()
+        };
+        println!(
+            "filtered: {} relations, {appearing} appearing primes (surplus {})",
+            filtered.len(),
+            filtered.len() as i64 - appearing as i64
+        );
+        for t in 0..num_seeds {
+            let seed = 0x5161_7A9F_2C3D_4E5Fu64 ^ t.wrapping_mul(0x9E3779B97F4A7C15);
+            let t0 = std::time::Instant::now();
+            match block_lanczos(&filtered, n_f, seed) {
+                None => println!("seed[{t}]: BREAKDOWN ({:.2?})", t0.elapsed()),
+                Some(d) if d.is_empty() => println!("seed[{t}]: EMPTY ({:.2?})", t0.elapsed()),
+                Some(d) => {
+                    // verify genuineness against the filtered rows
+                    let mut bad = 0;
+                    for dep in &d {
+                        let mut acc = vec![false; n_f];
+                        for &r in dep {
+                            for &c in &filtered[r] {
+                                acc[c as usize] ^= true;
+                            }
+                        }
+                        if acc.iter().any(|&b| b) {
+                            bad += 1;
+                        }
+                    }
+                    println!(
+                        "seed[{t}]: {} deps ({bad} non-genuine) ({:.2?})",
+                        d.len(),
+                        t0.elapsed()
+                    );
+                }
+            }
+        }
+        return;
+    }
+
     for t in 0..num_seeds {
         let seed = 0x5161_7A9F_2C3D_4E5Fu64 ^ t.wrapping_mul(0x9E3779B97F4A7C15);
         match block_lanczos(&rows, n_f, seed) {
