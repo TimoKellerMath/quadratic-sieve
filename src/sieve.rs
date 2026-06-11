@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use rug::Integer;
@@ -24,6 +24,50 @@ use crate::siqs_generator::*;
 /// (1 = none) and `relation` is the GF(2) exponent vector over the factor base.
 type RelationMsg = (Integer, Integer, FixedBitSet, u32, u32, usize);
 
+/// Slack multiplier for the sieve threshold, in units of the large-prime bound's
+/// log — `log2(large_prime_multiplier · p_max)`, the size of the biggest admissible
+/// large prime. So 1.0 admits every single-large-prime partial and 2.0 every
+/// double-large-prime cofactor, independent of the factor-base size or the
+/// large-prime multiplier in use.
+///
+/// Defaults are measured optima: 0.75 without the double large prime variation
+/// (measured at 202 bits). With it, the optimum grows with the size of N (larger
+/// non-smooth cofactors make partials more valuable): ~0.72 measured at 251 bits,
+/// ~1.15 at ~300 bits (the old-default equivalent; finer sweep pending), linearly
+/// interpolated in between and clamped outside. Overridable via the
+/// `SIQS_LP_SLACK` env var (e.g. `SIQS_LP_SLACK=1.5`) for parameter sweeps.
+fn lp_slack_multiplier(use_dlp: bool, n_bits: u32) -> f64 {
+    static OVERRIDE: OnceLock<Option<f64>> = OnceLock::new();
+    if let Some(m) = OVERRIDE.get_or_init(|| {
+        std::env::var("SIQS_LP_SLACK")
+            .ok()
+            .and_then(|s| s.parse().ok())
+    }) {
+        return *m;
+    }
+    if !use_dlp {
+        return 0.75;
+    }
+    // linear in n's bit size between the measured anchors (251, 0.72) and (300, 1.15)
+    let t = ((n_bits as f64 - 251.0) / (300.0 - 251.0)).clamp(0.0, 1.0);
+    0.72 + t * (1.15 - 0.72)
+}
+
+/// The sieve threshold's large-prime slack in bits:
+/// `lp_slack_multiplier · log2(large_prime_multiplier · p_max)`.
+fn lp_slack_bits(use_dlp: bool, n_bits: u32, largest_log: u32, large_prime_multiplier: u32) -> u32 {
+    let lp_bound_log = largest_log as f64 + (large_prime_multiplier as f64).log2();
+    (lp_slack_multiplier(use_dlp, n_bits) * lp_bound_log) as u32
+}
+
+/// A/B switch: set `SIQS_GLOBAL_THRESHOLD` to disable the per-block thresholds and
+/// use the single global `log2(kn/a)` bound for the whole interval (the pre-per-block
+/// behavior), for benchmarking the two strategies against each other.
+fn use_global_threshold() -> bool {
+    static GLOBAL: OnceLock<bool> = OnceLock::new();
+    *GLOBAL.get_or_init(|| std::env::var("SIQS_GLOBAL_THRESHOLD").is_ok())
+}
+
 /// One producer thread: repeatedly sieve a polynomial, scan for survivors, factor
 /// each over the factor base, and send the resulting (partial) relations to the
 /// consumer. Shared by [`quadratic_sieve_multithreaded`] and
@@ -41,6 +85,9 @@ fn run_sieve_producer(
     k: u32,
     large_prime_multiplier: u32,
     use_dlp: bool,
+    // large-prime slack in bits: how much non-smooth cofactor a candidate may keep.
+    // Computed once by the entry function via lp_slack_bits (it depends on n's size).
+    lp_slack: u32,
     sender: &mpsc::Sender<RelationMsg>,
 ) {
     let mut logs_for_polynomial = vec![0u8; 2 * sieve_interval_length];
@@ -73,107 +120,125 @@ fn run_sieve_producer(
             &mut buckets,
             BLOCK_SIZE,
         );
-        // threshold = log_2(kn/a) - large-prime slack - sum of small logs.
-        // With the double large prime variation we allow two large primes,
-        // so reserve extra slack — 1.5x the largest prime's log, a middle
-        // ground between one prime's worth and a full two, admitting fewer
-        // candidates than 2x while still catching most semiprime cofactors.
+        // Per-block thresholds: log2|Q(x)| is not flat over the interval — it is
+        // ≈ log2(kn/a) over most of it but dips near the two roots of Q at
+        // x ≈ ±M/√2, where smooth values are both likelier and cheaper. A single
+        // threshold derived from the maximum misses those, so evaluate |Q| at each
+        // scan block's midpoint and give every block its own
+        // threshold = log2|Q(mid)| − large-prime slack − sum of skipped small logs.
+        // f64 is exact enough here: its absolute error ~2^(bits−52) is far below
+        // |Q(x)| at any integer x.
         let log2_kn_over_a = kn_bits.saturating_sub(polynomial.a.significant_bits());
-        let largest_log = *logs.last().unwrap() as u32;
-        let lp_slack = if use_dlp {
-            3 * largest_log / 2
-        } else {
-            largest_log
-        };
-        let threshold: u8 = log2_kn_over_a
-            .saturating_sub(lp_slack)
-            .saturating_sub(sum_small_logs)
-            .min(u8::MAX as u32) as u8;
+        let a_f = polynomial.a.to_f64();
+        let b_f = polynomial.b.to_f64();
+        let c_f = polynomial.c.to_f64();
         let total = logs_for_polynomial.len();
-        let mut i = 0usize;
-        #[cfg(target_feature = "avx2")]
-        unsafe {
-            use std::arch::x86_64::*;
-            let thr_vec = _mm256_set1_epi8(threshold as i8);
-            let ptr = logs_for_polynomial.as_ptr();
-            while i + 32 <= total {
-                let chunk = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
-                // unsigned: chunk >= threshold  iff  max(chunk, thr) == chunk
-                let maxv = _mm256_max_epu8(chunk, thr_vec);
-                let eq = _mm256_cmpeq_epi8(maxv, chunk);
-                let mask = _mm256_movemask_epi8(eq) as u32;
-                if mask != 0 {
-                    let mut m = mask;
-                    while m != 0 {
-                        let j = m.trailing_zeros() as usize;
-                        m &= m - 1;
-                        let idx = i + j;
-                        let x = (idx as i32) - (sieve_interval_length as i32);
-                        evaluate_polynomial_at(x, &polynomial, kn, &mut u_scratch, &mut v_scratch);
-                        if let Some((relation, p, q)) = factor_over_factorbase(
-                            x,
-                            &v_scratch,
-                            factorbase,
-                            roots,
-                            reciprocals,
-                            k,
-                            large_prime_multiplier,
-                            use_dlp,
-                            &mut factor_scratch,
-                            &mut relation_scratch,
-                        ) {
-                            if sender
-                                .send((
-                                    u_scratch.clone(),
-                                    v_scratch.clone(),
-                                    relation,
-                                    p,
-                                    q,
-                                    index_thread,
-                                ))
-                                .is_err()
-                            {
-                                break 'outer_loop;
+        const SCAN_BLOCK: usize = 16384;
+        let mut block_start = 0usize;
+        while block_start < total {
+            let block_end = (block_start + SCAN_BLOCK).min(total);
+            let x_mid = (block_start + block_end) as f64 / 2.0 - sieve_interval_length as f64;
+            let q_mid = (a_f * x_mid + 2.0 * b_f) * x_mid + c_f;
+            // fall back to the global bound if the A/B switch disables per-block
+            // thresholds, if f64 overflowed (kn beyond ~2^1020), or the midpoint
+            // sits implausibly close to a root of Q
+            let q_bits = if !use_global_threshold() && q_mid.is_finite() && q_mid.abs() >= 2.0 {
+                q_mid.abs().log2() as u32
+            } else {
+                log2_kn_over_a
+            };
+            let threshold: u8 = q_bits
+                .saturating_sub(lp_slack)
+                .saturating_sub(sum_small_logs)
+                .clamp(1, u8::MAX as u32) as u8;
+            let mut i = block_start;
+            #[cfg(target_feature = "avx2")]
+            unsafe {
+                use std::arch::x86_64::*;
+                let thr_vec = _mm256_set1_epi8(threshold as i8);
+                let ptr = logs_for_polynomial.as_ptr();
+                while i + 32 <= block_end {
+                    let chunk = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
+                    // unsigned: chunk >= threshold  iff  max(chunk, thr) == chunk
+                    let maxv = _mm256_max_epu8(chunk, thr_vec);
+                    let eq = _mm256_cmpeq_epi8(maxv, chunk);
+                    let mask = _mm256_movemask_epi8(eq) as u32;
+                    if mask != 0 {
+                        let mut m = mask;
+                        while m != 0 {
+                            let j = m.trailing_zeros() as usize;
+                            m &= m - 1;
+                            let idx = i + j;
+                            let x = (idx as i32) - (sieve_interval_length as i32);
+                            evaluate_polynomial_at(
+                                x, &polynomial, kn, &mut u_scratch, &mut v_scratch,
+                            );
+                            if let Some((relation, p, q)) = factor_over_factorbase(
+                                x,
+                                &v_scratch,
+                                factorbase,
+                                roots,
+                                reciprocals,
+                                k,
+                                large_prime_multiplier,
+                                use_dlp,
+                                &mut factor_scratch,
+                                &mut relation_scratch,
+                            ) {
+                                if sender
+                                    .send((
+                                        u_scratch.clone(),
+                                        v_scratch.clone(),
+                                        relation,
+                                        p,
+                                        q,
+                                        index_thread,
+                                    ))
+                                    .is_err()
+                                {
+                                    break 'outer_loop;
+                                }
                             }
                         }
                     }
+                    i += 32;
                 }
-                i += 32;
             }
-        }
-        while i < total {
-            let log = logs_for_polynomial[i];
-            if log >= threshold {
-                let x = (i as i32) - (sieve_interval_length as i32);
-                evaluate_polynomial_at(x, &polynomial, kn, &mut u_scratch, &mut v_scratch);
-                if let Some((relation, p, q)) = factor_over_factorbase(
-                    x,
-                    &v_scratch,
-                    factorbase,
-                    roots,
-                    reciprocals,
-                    k,
-                    large_prime_multiplier,
-                    use_dlp,
-                    &mut factor_scratch,
-                    &mut relation_scratch,
-                ) {
-                    if sender
-                        .send((
-                            u_scratch.clone(),
-                            v_scratch.clone(),
-                            relation,
-                            p,
-                            q,
-                            index_thread,
-                        ))
-                        .is_err()
-                    {
-                        break 'outer_loop;
+            while i < block_end {
+                let log = logs_for_polynomial[i];
+                if log >= threshold {
+                    let x = (i as i32) - (sieve_interval_length as i32);
+                    evaluate_polynomial_at(x, &polynomial, kn, &mut u_scratch, &mut v_scratch);
+                    if let Some((relation, p, q)) = factor_over_factorbase(
+                        x,
+                        &v_scratch,
+                        factorbase,
+                        roots,
+                        reciprocals,
+                        k,
+                        large_prime_multiplier,
+                        use_dlp,
+                        &mut factor_scratch,
+                        &mut relation_scratch,
+                    ) {
+                        if sender
+                            .send((
+                                u_scratch.clone(),
+                                v_scratch.clone(),
+                                relation,
+                                p,
+                                q,
+                                index_thread,
+                            ))
+                            .is_err()
+                        {
+                            break 'outer_loop;
+                        }
                     }
                 }
+                i += 1;
             }
-            i += 1;
+            block_start = block_end;
         }
     }
 }
@@ -217,8 +282,14 @@ pub fn quadratic_sieve_multithreaded(
     // double large prime variation: only worthwhile for larger N, where non-smooth
     // cofactors are big enough that admitting two large primes pays for the extra
     // primality test / Pollard-rho split and the larger partial-relation graph.
-    let use_dlp = n.significant_bits() > 250;
+    let n_bits = n.significant_bits();
+    let use_dlp = n_bits > 250;
     println!("double large prime: {use_dlp}");
+    let lp_slack = lp_slack_bits(use_dlp, n_bits, *logs.last().unwrap() as u32, large_prime_multiplier);
+    println!(
+        "lp slack multiplier: {:.2} ({lp_slack} bits)",
+        lp_slack_multiplier(use_dlp, n_bits),
+    );
     let n = Arc::new(n);
     let kn = Arc::new(kn.clone());
     let shared_factor = Arc::new(Mutex::new(None));
@@ -310,6 +381,7 @@ pub fn quadratic_sieve_multithreaded(
             k,
             large_prime_multiplier,
             use_dlp,
+            lp_slack,
             &sender,
         );
         // drop the original sender so the consumer's recv() terminates once every
@@ -334,6 +406,7 @@ fn spawn_sieve_producers<'scope, 'env>(
     k: u32,
     large_prime_multiplier: u32,
     use_dlp: bool,
+    lp_slack: u32,
     sender: &mpsc::Sender<RelationMsg>,
 ) {
     for (index_thread, polynomial_generator) in polynomial_generators.iter_mut().enumerate() {
@@ -355,6 +428,7 @@ fn spawn_sieve_producers<'scope, 'env>(
                 k,
                 large_prime_multiplier,
                 use_dlp,
+                lp_slack,
                 &sender,
             );
         });
@@ -414,8 +488,14 @@ pub fn quadratic_sieve_lanczos(
     let reciprocals = Arc::new(compute_reciprocals(&factorbase));
     let factorbase = Arc::new(factorbase.clone());
     let kn_bits = kn.significant_bits();
-    let use_dlp = n.significant_bits() > 250;
+    let n_bits = n.significant_bits();
+    let use_dlp = n_bits > 250;
     println!("double large prime: {use_dlp}");
+    let lp_slack = lp_slack_bits(use_dlp, n_bits, *logs.last().unwrap() as u32, large_prime_multiplier);
+    println!(
+        "lp slack multiplier: {:.2} ({lp_slack} bits)",
+        lp_slack_multiplier(use_dlp, n_bits),
+    );
     let n = Arc::new(n);
     let kn = Arc::new(kn.clone());
     let shared_factor = Arc::new(Mutex::new(None));
@@ -537,6 +617,7 @@ pub fn quadratic_sieve_lanczos(
             k,
             large_prime_multiplier,
             use_dlp,
+            lp_slack,
             &sender,
         );
         drop(sender);
