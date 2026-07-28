@@ -94,8 +94,9 @@ fn run_sieve_producer(
     let mut logs_for_polynomial = vec![0u8; 2 * sieve_interval_length];
     // scratch reused across polynomials by the blocked sieve
     let mut next_pos: Vec<usize> = Vec::with_capacity(2 * factorbase.len());
-    // per-block buckets of large-prime hits, reused across polynomials
-    let mut buckets: Vec<Vec<(u32, u8)>> = Vec::new();
+    // per-block buckets of large-prime hits (packed position|log), reused across
+    // polynomials
+    let mut buckets: Vec<Vec<u32>> = Vec::new();
     // scratch integer reused by factor_over_factorbase per candidate
     let mut factor_scratch = Integer::new();
     // scratch bitset reused across candidates (cloned out only on a hit)

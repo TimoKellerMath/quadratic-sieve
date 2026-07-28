@@ -72,7 +72,7 @@ fn main() {
     let total_len = 2 * sieve_interval_length;
     let mut buffer = vec![0u8; total_len];
     let mut next_pos: Vec<usize> = Vec::with_capacity(2 * factorbase.len());
-    let mut buckets: Vec<Vec<(u32, u8)>> = Vec::new();
+    let mut buckets: Vec<Vec<u32>> = Vec::new();
     let reciprocals = siqs::factorbase::compute_reciprocals(&factorbase);
 
     // block sizes to test
