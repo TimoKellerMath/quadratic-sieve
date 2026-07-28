@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
@@ -103,17 +104,27 @@ fn run_sieve_producer(
     let mut u_scratch = Integer::new();
     let mut v_scratch = Integer::new();
 
+    // SIQS_PROFILE: thread 0 periodically prints a per-phase time breakdown
+    let profile = std::env::var("SIQS_PROFILE").is_ok() && index_thread == 0;
+    let mut prof_polys = 0u64;
+    let mut prof_poly = Duration::ZERO;
+    let mut prof_sieve = Duration::ZERO;
+    let mut prof_scan = Duration::ZERO;
+
     // Producers run forever: a producer never decides on its own to stop. The
     // consumer is the sole authority that terminates them — it drops the relation
     // receiver, and the next `send` below then fails and breaks `'outer_loop`.
     'outer_loop: loop {
+        let prof_t0 = Instant::now();
         let (polynomial, roots) = polynomial_generator.next_polynomial();
         debug_print!("{}", format_color("?", index_thread));
         const BLOCK_SIZE: usize = 2 * 65536;
+        let prof_t1 = Instant::now();
         let sum_small_logs = sieve_over_factorbase_blocked(
             sieve_interval_length,
             factorbase,
             roots,
+            reciprocals,
             logs,
             &mut logs_for_polynomial,
             &mut next_pos,
@@ -132,6 +143,7 @@ fn run_sieve_producer(
         let a_f = polynomial.a.to_f64();
         let b_f = polynomial.b.to_f64();
         let c_f = polynomial.c.to_f64();
+        let prof_t2 = Instant::now();
         let total = logs_for_polynomial.len();
         const SCAN_BLOCK: usize = 16384;
         let mut block_start = 0usize;
@@ -239,6 +251,25 @@ fn run_sieve_producer(
                 i += 1;
             }
             block_start = block_end;
+        }
+        if profile {
+            prof_polys += 1;
+            prof_poly += prof_t1 - prof_t0;
+            prof_sieve += prof_t2 - prof_t1;
+            prof_scan += prof_t2.elapsed();
+            if prof_polys.is_multiple_of(2000) {
+                // sieve-internal split, averaged across all threads' calls
+                let calls = SIEVE_CALLS.load(Ordering::Relaxed).max(1);
+                let setup = SIEVE_SETUP_NANOS.load(Ordering::Relaxed) / calls / 1000;
+                let bloop = SIEVE_LOOP_NANOS.load(Ordering::Relaxed) / calls / 1000;
+                eprintln!(
+                    "[profile] {prof_polys} polys | per poly: poly {:.0}us \
+                     sieve {:.0}us (setup {setup}us loop {bloop}us) scan+factor {:.0}us",
+                    prof_poly.as_micros() as f64 / prof_polys as f64,
+                    prof_sieve.as_micros() as f64 / prof_polys as f64,
+                    prof_scan.as_micros() as f64 / prof_polys as f64,
+                );
+            }
         }
     }
 }

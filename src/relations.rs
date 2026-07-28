@@ -5,6 +5,21 @@ use itertools::izip;
 use rug::{Assign, Complete, Integer};
 use rustc_hash::FxHashMap;
 use std::io::{self, Write};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Cumulative sieve-internal phase times across all threads (nanoseconds), only
+/// accumulated when SIQS_PROFILE is set: bucket fill + carry-position setup vs the
+/// add/drain block loop, and the number of sieve calls. Read by the producer's
+/// profile report to break down where the sieve pass spends its time.
+pub static SIEVE_SETUP_NANOS: AtomicU64 = AtomicU64::new(0);
+pub static SIEVE_LOOP_NANOS: AtomicU64 = AtomicU64::new(0);
+pub static SIEVE_CALLS: AtomicU64 = AtomicU64::new(0);
+
+fn sieve_profile_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SIQS_PROFILE").is_ok())
+}
 
 pub struct Relations {
     relations: Vec<FixedBitSet>,
@@ -545,10 +560,12 @@ pub fn sieve_over_factorbase(
 /// - `block_size`: block size in elements (choose e.g. 8k .. 64k)
 ///
 /// Returns sum of small logs (same as other variants).
+#[allow(clippy::too_many_arguments)]
 pub fn sieve_over_factorbase_blocked(
     sieve_interval_length: usize,
     factorbase: &[u32],
     roots: &[Option<(u32, u32)>],
+    reciprocals: &[u64],
     logs: &[u8],
     logs_for_polynomial: &mut [u8],
     next_pos: &mut Vec<usize>,
@@ -580,6 +597,9 @@ pub fn sieve_over_factorbase_blocked(
         .partition_point(|&p| (p as usize) <= bsize)
         .max(ns);
 
+    let profile = sieve_profile_enabled();
+    let prof_t0 = profile.then(std::time::Instant::now);
+
     // --- bucket the large primes (p > block_size): one entry per hit ---
     if buckets.len() < num_blocks {
         buckets.resize_with(num_blocks, Vec::new);
@@ -587,6 +607,8 @@ pub fn sieve_over_factorbase_blocked(
     for bucket in buckets.iter_mut() {
         bucket.clear();
     }
+    // reciprocals: taken already so the Barrett-setup variant is signature-compatible
+    let _ = reciprocals;
     for (&p, &roots_opt, &log) in izip!(&factorbase[split..], &roots[split..], &logs[split..]) {
         let Some((root1, root2)) = roots_opt else {
             continue;
@@ -622,6 +644,8 @@ pub fn sieve_over_factorbase_blocked(
             next_pos.push(usize::MAX);
         }
     }
+
+    let prof_t1 = profile.then(std::time::Instant::now);
 
     // --- process each block: small primes by carry walk, then drain its bucket ---
     let small_primes = &factorbase[ns..split];
@@ -666,6 +690,12 @@ pub fn sieve_over_factorbase_blocked(
         }
         block_start = block_end;
         block_idx += 1;
+    }
+
+    if let (Some(t0), Some(t1)) = (prof_t0, prof_t1) {
+        SIEVE_SETUP_NANOS.fetch_add((t1 - t0).as_nanos() as u64, Ordering::Relaxed);
+        SIEVE_LOOP_NANOS.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        SIEVE_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
     logs[..ns].iter().map(|&l| l as u32).sum::<u32>()
@@ -769,6 +799,7 @@ mod tests {
             .collect();
 
         let want = reference_sieve(sieve_interval_length, &factorbase, &roots, &logs);
+        let reciprocals = crate::factorbase::compute_reciprocals(&factorbase);
         let total_len = 2 * sieve_interval_length;
         let mut next_pos = Vec::new();
         let mut buckets: Vec<Vec<(u32, u8)>> = Vec::new();
@@ -781,6 +812,7 @@ mod tests {
                 sieve_interval_length,
                 &factorbase,
                 &roots,
+                &reciprocals,
                 &logs,
                 &mut buf,
                 &mut next_pos,
