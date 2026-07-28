@@ -29,7 +29,11 @@ pub struct SIQSPolynomialData<'a> {
     num_a: usize,               // the num_a-th chosen a
     bis: Vec<Integer>, // for i = 1..s: B[i] = a/q[i] * gamma, gamma = sqrt(n mod p) * (a/q[i])^-1 (mod q[i])
     q_inv_mod_ps: Vec<Option<NonZeroU32>>, //  for all p \nmid a in factorbase: (a^-1 mod p)
-    bainv2ips: Vec<Vec<Option<u32>>>, // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all \nmid a in factorbase
+    // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all p \nmid a in
+    // factorbase. Plain u32 (0 dummy where p | a): validity is decided by
+    // q_inv_mod_ps[p].is_none(), so an Option here would only double the memory
+    // traffic of the per-polynomial root-update loop.
+    bainv2ips: Vec<Vec<u32>>,
     roots: Vec<Option<(u32, u32)>>, // for all p \nmid a in factorbase: (root1,root2) = (ainv * (sqrt(n mod p) - b), ainv * (-sqrt(n mod p) - b)) (mod p)
 
     j: usize, // index of polynomial for fixed a, 1 <= j <= 2^(s-1) - 1,
@@ -286,9 +290,9 @@ impl<'a> SIQSPolynomialData<'a> {
                 if let Some(ainvp) = ainvp {
                     let bainv2jp =
                         (b.mod_u(p) as u64 * (ainvp.get() as u64 * 2) % p as u64) as u32;
-                    bainv2ips.push(Some(bainv2jp));
+                    bainv2ips.push(bainv2jp);
                 } else {
-                    bainv2ips.push(None);
+                    bainv2ips.push(0); // dummy: q_inv_mod_ps is None here, never read
                 }
             }
         }
@@ -414,7 +418,7 @@ impl<'a> SIQSPolynomialData<'a> {
                 && self.factorbase.len() == self.roots.len()
                 && self.roots.len() == self.bainv2ips[nu].len()
         );
-        for (roots, &p, q_inv, bainv) in izip!(
+        for (roots, &p, q_inv, &bainv) in izip!(
             &mut self.roots,
             self.factorbase,
             &self.q_inv_mod_ps,
@@ -429,11 +433,9 @@ impl<'a> SIQSPolynomialData<'a> {
                 } else {
                     *roots = None;
                 }
-            } else if let Some(roots_) = *roots
-                && let Some(bainv2ip) = bainv
-            {
+            } else if let Some(roots_) = *roots {
                 let new_roots =
-                    Self::new_roots_with_sign(roots_, *bainv2ip, p, rounded_exponent % 2 != 0);
+                    Self::new_roots_with_sign(roots_, bainv, p, rounded_exponent % 2 != 0);
                 *roots = Some(new_roots);
                 // check that we really have roots of (ax + b)^2 - n
                 debug_assert!(
