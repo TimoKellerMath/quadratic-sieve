@@ -617,6 +617,107 @@ mod tests {
         }
     }
 
+    // Across whole families, every root solves Q(r) ≡ 0 (mod p), a prime has a
+    // single root exactly when it divides a, and c = (b^2 - n)/a is exact.
+    #[test]
+    fn polynomials_and_roots_are_consistent() {
+        let n = "6427752177035961102167848371107669985402627402189138248671463"
+            .parse::<Integer>()
+            .unwrap();
+        let factorbase = make_factorbase(&n, 1500);
+        let n_roots = square_roots_mod_factorbase(&n, &factorbase);
+        let mut generators =
+            new_polynomial_generators(&n, 65536, 1, &factorbase, &n_roots, &factorbase);
+        let generator = &mut generators[0];
+        let count = 3 << (generator.num_factors - 1);
+        for _ in 0..count {
+            let (polynomial, roots) = generator.next_polynomial();
+            let (a, b, c) = (polynomial.a, &polynomial.b, &polynomial.c);
+            assert_eq!(b.clone().square() - a.clone() * c, n);
+            for (i, &p) in factorbase.iter().enumerate() {
+                let Some((r1, r2)) = roots.get(i) else {
+                    assert!(p <= 2, "no roots mod {p}");
+                    continue;
+                };
+                for r in [r1, r2] {
+                    assert!(r < p, "root {r} mod {p} is not reduced");
+                    let q_r = a.clone() * r * r + b.clone() * 2u32 * r + c;
+                    assert_eq!(q_r.mod_u(p), 0, "Q({r}) != 0 mod {p}");
+                }
+                assert_eq!(r1 == r2, a.is_divisible_u(p), "number of roots mod {p}");
+            }
+        }
+    }
+
+    // a = q^2 with q the product of the q-primes, and B_i^2 ≡ n (mod q_i^2) while
+    // B_i ≡ 0 (mod q_j^2) for j != i, so b = sum of B_i is a square root of n mod a.
+    #[test]
+    fn b_i_are_square_roots_of_n_mod_their_q_squared() {
+        let n = "6427752177035961102167848371107669985402627402189138248671463"
+            .parse::<Integer>()
+            .unwrap();
+        let factorbase = make_factorbase(&n, 1500);
+        let n_roots = square_roots_mod_factorbase(&n, &factorbase);
+        let mut generators =
+            new_polynomial_generators(&n, 65536, 1, &factorbase, &n_roots, &factorbase);
+        let generator = &mut generators[0];
+        let family = 1usize << (generator.num_factors - 1);
+        for k in 0..3 * family {
+            let a = generator.next_polynomial().0.a.clone();
+            if k % family != 0 {
+                continue;
+            }
+            // the first polynomial of a family: check its a and B_i
+            let qis = &generator.list_of_qis[generator.num_a - 1];
+            let q = qis.iter().fold(Integer::from(1), |q, &q_i| q * q_i);
+            assert_eq!(a, q.square());
+            assert_eq!(generator.bis.len(), qis.len());
+            for (i, b_i) in generator.bis.iter().enumerate() {
+                for (j, &q_j) in qis.iter().enumerate() {
+                    let residue = if i == j {
+                        b_i.clone().square() - &n
+                    } else {
+                        b_i.clone()
+                    };
+                    assert!(
+                        residue.is_divisible(&Integer::from(q_j).square()),
+                        "B_{i} is wrong mod q_{j}^2"
+                    );
+                }
+            }
+        }
+    }
+
+    // The root of the linear polynomial 2 b x + c modulo p | a is reduced and
+    // correct for every c, including c ≡ 0, where it used to be p (d2fbf80).
+    #[test]
+    fn linear_root_is_reduced_and_correct() {
+        let p = 101u32;
+        for b in [Integer::from(12345), Integer::from(-12345)] {
+            for residue in 0..p {
+                for c in [
+                    Integer::from(residue + 7 * p),
+                    Integer::from(residue) - 1000 * p,
+                ] {
+                    let root = SIQSPolynomialData::linear_root_mod_p(&b, &c, p).unwrap();
+                    assert!(root < p, "root {root} mod {p} is not reduced");
+                    assert_eq!((b.clone() * 2u32 * root + &c).mod_u(p), 0);
+                }
+            }
+            assert_eq!(
+                SIQSPolynomialData::linear_root_mod_p(&b, &Integer::from(3 * p), p),
+                Some(0)
+            );
+        }
+        // no roots for the -1 entry and modulo 2
+        for p in [0, 2] {
+            assert_eq!(
+                SIQSPolynomialData::linear_root_mod_p(&Integer::from(5), &Integer::from(3), p),
+                None
+            );
+        }
+    }
+
     // Small N: the factor base is short and the ideal q is tiny, so the
     // prime-selection window sits near the start of the factor base. Building a
     // generator must not panic (it used to underflow `i - range_size` and trip
