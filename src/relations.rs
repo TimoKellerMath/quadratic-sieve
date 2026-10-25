@@ -2,7 +2,6 @@ use crate::constants::NUM_SKIP_PRIMES;
 use crate::number_theory::{is_prime_u32, is_probable_prime_base2, pollard_rho_u64};
 use crate::polynomial_generator::{Polynomial, Roots};
 use fixedbitset::FixedBitSet;
-use itertools::izip;
 use rug::{Assign, Complete, Integer};
 use rustc_hash::FxHashMap;
 use std::io::{self, Write};
@@ -615,12 +614,12 @@ pub fn sieve_over_factorbase_blocked(
     let ends = buckets.ends.as_mut_ptr();
     // the packed entry holds the position in 24 bits and the log in the top 8
     debug_assert!(total_len < (1 << 24));
-    for (&p, &root1, &root2, &log) in izip!(
-        &factorbase[split..],
-        &roots.r1[split..],
-        &roots.r2[split..],
-        &logs[split..]
-    ) {
+    for (((&p, &root1), &root2), &log) in factorbase[split..]
+        .iter()
+        .zip(&roots.r1[split..])
+        .zip(&roots.r2[split..])
+        .zip(&logs[split..])
+    {
         if root1 == Roots::NONE {
             continue;
         }
@@ -645,11 +644,11 @@ pub fn sieve_over_factorbase_blocked(
 
     // --- carry positions for the small primes (p <= block_size) ---
     next_pos.clear();
-    for (&p, &root1, &root2) in izip!(
-        &factorbase[ns..split],
-        &roots.r1[ns..split],
-        &roots.r2[ns..split]
-    ) {
+    for ((&p, &root1), &root2) in factorbase[ns..split]
+        .iter()
+        .zip(&roots.r1[ns..split])
+        .zip(&roots.r2[ns..split])
+    {
         if root1 != Roots::NONE {
             let p_us = p as usize;
             next_pos.push((root1 as usize + sieve_interval_length) % p_us);
@@ -676,7 +675,7 @@ pub fn sieve_over_factorbase_blocked(
     while block_start < total_len {
         let block_end = (block_start + block_size).min(total_len);
         let mut idx = 0usize;
-        for (&p, &log) in izip!(small_primes, small_logs) {
+        for (&p, &log) in small_primes.iter().zip(small_logs) {
             let p_us = p as usize;
             unsafe {
                 let pos1 = *next_pos_ptr.add(idx);

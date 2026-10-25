@@ -3,7 +3,7 @@ use crate::number_theory::{lift_square_root_mod_q2, modular_inverse_u32};
 use crate::polynomial_generator::{Polynomial, Roots};
 use crate::{debug_print, debug_println};
 use core::num::NonZero;
-use itertools::{Itertools, izip};
+use itertools::Itertools;
 use rug::{Complete, Integer};
 use std::num::NonZeroU32;
 
@@ -281,7 +281,7 @@ impl<'a> SIQSPolynomialData<'a> {
         for b in self.bis.iter() {
             self.bainv2ips.push(Vec::with_capacity(factorbase.len()));
             let bainv2ips = self.bainv2ips.last_mut().unwrap();
-            for (&ainvp, &p) in izip!(&self.q_inv_mod_ps, factorbase) {
+            for (&ainvp, &p) in self.q_inv_mod_ps.iter().zip(factorbase) {
                 if let Some(ainvp) = ainvp {
                     let bainv2jp = (b.mod_u(p) as u64 * (ainvp.get() as u64 * 2) % p as u64) as u32;
                     bainv2ips.push(bainv2jp);
@@ -319,7 +319,7 @@ impl<'a> SIQSPolynomialData<'a> {
         // compute roots of polynomial modulo p in factorbase
         self.roots.clear();
         assert!(factorbase.len() == self.q_inv_mod_ps.len() && factorbase.len() == roots.len());
-        for (&p, q_inv, root) in izip!(factorbase, &self.q_inv_mod_ps, roots) {
+        for ((&p, q_inv), root) in factorbase.iter().zip(&self.q_inv_mod_ps).zip(roots) {
             // TODO: factor out into "roots of polynomial"; update root updates!
             if let Some(ainvp) = q_inv {
                 let roots = (
@@ -410,13 +410,15 @@ impl<'a> SIQSPolynomialData<'a> {
                 && self.factorbase.len() == self.roots.len()
                 && self.roots.len() == self.bainv2ips[nu].len()
         );
-        for (r1, r2, &p, q_inv, &bainv) in izip!(
-            &mut self.roots.r1,
-            &mut self.roots.r2,
-            self.factorbase,
-            &self.q_inv_mod_ps,
-            &self.bainv2ips[nu]
-        ) {
+        for ((((r1, r2), &p), q_inv), &bainv) in self
+            .roots
+            .r1
+            .iter_mut()
+            .zip(&mut self.roots.r2)
+            .zip(self.factorbase)
+            .zip(&self.q_inv_mod_ps)
+            .zip(&self.bainv2ips[nu])
+        {
             if q_inv.is_none() {
                 // double root, i.e., we have a linear polynomial (really? it only means discriminant is 0)
                 if let Some(root) = Self::root_of_linear_polynomial_mod_p(&b, &c, p) {
