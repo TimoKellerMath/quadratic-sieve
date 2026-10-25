@@ -64,3 +64,92 @@ pub fn square_roots_mod_factorbase(n: &Integer, factorbase: &[u32]) -> Vec<u32> 
     }
     square_roots
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rug::integer::IsPrime;
+
+    // the 202-bit example from main.rs
+    fn example_n() -> Integer {
+        "6427752177035961102167848371107669985402627402189138248671463"
+            .parse()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_make_factorbase() {
+        let factorbase = make_factorbase(&Integer::from(400003), 10);
+        // index 0 holds the sentinel 0 standing for -1
+        assert_eq!(factorbase, vec![0u32, 2, 3, 7, 29, 31, 37, 43, 71, 73]);
+    }
+
+    #[test]
+    fn factorbase_holds_exactly_the_quadratic_residue_primes() {
+        let n = example_n();
+        let factorbase = make_factorbase(&n, 500);
+        assert_eq!(factorbase.len(), 500);
+        assert_eq!(&factorbase[..2], &[0, 2]);
+        // every odd prime up to the largest one, if and only if n is a square mod it
+        let largest = *factorbase.last().unwrap();
+        let expected: Vec<u32> = (3..=largest)
+            .filter(|&p| {
+                let p = Integer::from(p);
+                p.is_probably_prime(30) != IsPrime::No && n.legendre(&p) == 1
+            })
+            .collect();
+        assert_eq!(&factorbase[2..], &expected[..]);
+    }
+
+    #[test]
+    fn test_square_roots_mod_factorbase() {
+        let n = Integer::from(400003);
+        let factorbase = make_factorbase(&n, 10);
+        let square_roots = square_roots_mod_factorbase(&n, &factorbase);
+        // index 0 (the -1 sentinel) has square root 0
+        assert_eq!(square_roots, vec![0u32, 1, 1, 4, 8, 14, 12, 24, 29, 6]);
+    }
+
+    #[test]
+    fn square_roots_square_to_n() {
+        let n = example_n();
+        let factorbase = make_factorbase(&n, 500);
+        let square_roots = square_roots_mod_factorbase(&n, &factorbase);
+        assert_eq!(&square_roots[..2], &[0, 1]);
+        for (&p, &r) in factorbase.iter().zip(&square_roots).skip(2) {
+            assert!(r < p, "root {r} of n mod {p} is not reduced");
+            assert_eq!(
+                (Integer::from(r).square() - &n).mod_u(p),
+                0,
+                "r^2 != n mod {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn logs_are_rounded_log2() {
+        let factorbase = make_factorbase(&example_n(), 500);
+        let logs = compute_logs(&factorbase);
+        assert_eq!(logs.len(), factorbase.len());
+        assert_eq!(&logs[..2], &[0, 1]);
+        for (&p, &log) in factorbase.iter().zip(&logs).skip(1) {
+            let error = ((p as f64).log2() - log as f64).abs();
+            assert!(error <= 0.5 + 1e-6, "log of {p} is {log}");
+        }
+    }
+
+    #[test]
+    fn reciprocals_are_floor_of_2_64_over_p() {
+        let factorbase = make_factorbase(&example_n(), 500);
+        let reciprocals = compute_reciprocals(&factorbase);
+        // the -1 sentinel has none
+        assert_eq!(reciprocals[0], 0);
+        for (&p, &m) in factorbase.iter().zip(&reciprocals).skip(1) {
+            let (p, m) = (p as u128, m as u128);
+            assert!(
+                m * p <= 1 << 64 && (m + 1) * p > 1 << 64,
+                "reciprocal of {p}"
+            );
+        }
+    }
+}

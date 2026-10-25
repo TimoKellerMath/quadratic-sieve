@@ -688,22 +688,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_make_factorbase() {
-        let factorbase = make_factorbase(&Integer::from(400003), 10);
-        // index 0 holds the sentinel 0 standing for -1
-        assert_eq!(factorbase, vec![0u32, 2, 3, 7, 29, 31, 37, 43, 71, 73]);
-    }
-
-    #[test]
-    fn test_square_roots_mod_factorbase() {
-        let n = Integer::from(400003);
-        let factorbase = make_factorbase(&n, 10);
-        let square_roots = square_roots_mod_factorbase(&n, &factorbase);
-        // index 0 (the -1 sentinel) has square root 0
-        assert_eq!(square_roots, vec![0u32, 1, 1, 4, 8, 14, 12, 24, 29, 6]);
-    }
-
-    #[test]
     fn test_compute_sieve_parameters() {
         for bits in 63..=213 {
             println!("{bits}: {:?}", compute_sieve_parameters(bits));
