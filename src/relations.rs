@@ -1,5 +1,6 @@
+use crate::constants::NUM_SKIP_PRIMES;
 use crate::number_theory::{is_prime_u32, is_probable_prime_base2, pollard_rho_u64};
-use crate::{constants::NUM_SKIP_PRIMES, polynomial_generator::Polynomial};
+use crate::polynomial_generator::{Polynomial, Roots};
 use fixedbitset::FixedBitSet;
 use itertools::izip;
 use rug::{Assign, Complete, Integer};
@@ -325,7 +326,7 @@ pub fn factor_over_factorbase(
     x: i32,
     y: &Integer,
     factorbase: &[u32],
-    roots: &[Option<(u32, u32)>],
+    roots: &Roots,
     reciprocals: &[u64],
     k: u32,
     large_prime_multiplier: u32,
@@ -386,7 +387,7 @@ pub fn factor_over_factorbase(
     let mut fits_u64 = y_.significant_bits() <= 63;
     while !fits_u64 && i < factorbase.len() {
         let p = factorbase[i];
-        let divides = match roots[i] {
+        let divides = match roots.get(i) {
             Some((r1, r2)) => {
                 let xmp = x_mod_p(x_abs, x_neg, p, reciprocals[i]);
                 xmp == r1 || xmp == r2
@@ -425,7 +426,7 @@ pub fn factor_over_factorbase(
         if p * p > y_u64 {
             break;
         }
-        let divides = match roots[i] {
+        let divides = match roots.get(i) {
             Some((r1, r2)) => {
                 let xmp = x_mod_p(x_abs, x_neg, factorbase[i], reciprocals[i]) as u64;
                 xmp == r1 as u64 || xmp == r2 as u64
@@ -498,7 +499,7 @@ pub fn factor_over_factorbase(
 pub fn sieve_over_factorbase(
     sieve_interval_length: usize,
     factorbase: &[u32],
-    roots: &[Option<(u32, u32)>],
+    roots: &Roots,
     logs: &[u8],
     logs_for_polynomial: &mut [u8],
     //polynomial: &Polynomial,
@@ -514,8 +515,10 @@ pub fn sieve_over_factorbase(
     //println!("roots = {:?}", &roots[..5]);
     // sieve for all primes p_i with i >= NUM_SKIP_PRIMES in factor base
     let total_len = logs_for_polynomial.len();
-    for (&p, &roots, &log) in izip!(factorbase, roots, logs).skip(NUM_SKIP_PRIMES) {
-        if let Some((root1, root2)) = roots {
+    for (&p, &root1, &root2, &log) in
+        izip!(factorbase, &roots.r1, &roots.r2, logs).skip(NUM_SKIP_PRIMES)
+    {
+        if root1 != Roots::NONE {
             let p_us = p as usize;
             // smallest i >= 0 with (i - M) ≡ root (mod p), i.e. i ≡ root + M (mod p)
             let index1 = (root1 as usize + sieve_interval_length) % p_us;
@@ -541,6 +544,54 @@ pub fn sieve_over_factorbase(
         .iter()
         .map(|&l| l as u32)
         .sum::<u32>()
+}
+
+/// Per-block buckets of large-prime hits for [`sieve_over_factorbase_blocked`], in one
+/// flat array: bucket `b` occupies `data[b * stride..ends[b]]`. The stride covers every
+/// hit a block can get, so the fill needs no capacity or bounds checks. Owned by the
+/// caller so that the allocation is reused across polynomials.
+#[derive(Default)]
+pub struct Buckets {
+    data: Vec<u32>,
+    ends: Vec<usize>,
+    stride: usize,
+}
+
+impl Buckets {
+    // empty `num_blocks` buckets with room for `stride` entries each
+    fn reset(&mut self, num_blocks: usize, stride: usize) {
+        if self.data.len() < num_blocks * stride {
+            // a zeroed allocation: pages that are never written are never touched
+            self.data = vec![0; num_blocks * stride];
+        }
+        self.stride = stride;
+        self.ends.clear();
+        self.ends.extend((0..num_blocks).map(|b| b * stride));
+    }
+
+    // the hits that fall into block `b`
+    fn block(&self, b: usize) -> &[u32] {
+        debug_assert!(
+            self.ends[b] <= (b + 1) * self.stride,
+            "bucket {b} overflowed"
+        );
+        &self.data[b * self.stride..self.ends[b]]
+    }
+}
+
+/// Appends `entry` to bucket `block` of the flat arrays of a [`Buckets`].
+///
+/// # Safety
+///
+/// `block` must be below the number of buckets, and the bucket must have room.
+#[inline(always)]
+unsafe fn push_hit(data: *mut u32, ends: *mut usize, block: usize, entry: u32) {
+    // SAFETY: guaranteed by the caller
+    unsafe {
+        let end = ends.add(block);
+        *data.add(*end) = entry;
+        *end += 1;
+    }
 }
 
 /// Blocked (segmented) version of the sieve which reuses `logs_for_polynomial`
@@ -573,12 +624,12 @@ pub fn sieve_over_factorbase(
 pub fn sieve_over_factorbase_blocked(
     sieve_interval_length: usize,
     factorbase: &[u32],
-    roots: &[Option<(u32, u32)>],
+    roots: &Roots,
     reciprocals: &[u64],
     logs: &[u8],
     logs_for_polynomial: &mut [u8],
     next_pos: &mut Vec<usize>,
-    buckets: &mut Vec<Vec<u32>>,
+    buckets: &mut Buckets,
     block_size: usize,
 ) -> u32 {
     debug_assert_eq!(factorbase.len(), roots.len());
@@ -609,31 +660,37 @@ pub fn sieve_over_factorbase_blocked(
     let prof_t0 = profile.then(std::time::Instant::now);
 
     // --- bucket the large primes (p > block_size): one entry per hit ---
-    if buckets.len() < num_blocks {
-        buckets.resize_with(num_blocks, Vec::new);
-    }
-    for bucket in buckets.iter_mut() {
-        bucket.clear();
-    }
+    // each root of a prime larger than a block hits that block at most once
+    buckets.reset(num_blocks, 2 * (factorbase.len() - split));
+    let data = buckets.data.as_mut_ptr();
+    let ends = buckets.ends.as_mut_ptr();
     // reciprocals: taken already so the Barrett-setup variant is signature-compatible
     let _ = reciprocals;
     // the packed entry holds the position in 24 bits and the log in the top 8
     debug_assert!(total_len < (1 << 24));
-    for (&p, &roots_opt, &log) in izip!(&factorbase[split..], &roots[split..], &logs[split..]) {
-        let Some((root1, root2)) = roots_opt else {
+    for (&p, &root1, &root2, &log) in izip!(
+        &factorbase[split..],
+        &roots.r1[split..],
+        &roots.r2[split..],
+        &logs[split..]
+    ) {
+        if root1 == Roots::NONE {
             continue;
-        };
+        }
         let log_packed = (log as u32) << 24;
         let p_us = p as usize;
         let mut pos = (root1 as usize + sieve_interval_length) % p_us;
         while pos < total_len {
-            buckets[pos >> block_shift].push(pos as u32 | log_packed);
+            // SAFETY: pos < total_len, so the block index is below num_blocks, and
+            // the stride leaves room for every hit
+            unsafe { push_hit(data, ends, pos >> block_shift, pos as u32 | log_packed) };
             pos += p_us;
         }
         if root2 != root1 {
             let mut pos = (root2 as usize + sieve_interval_length) % p_us;
             while pos < total_len {
-                buckets[pos >> block_shift].push(pos as u32 | log_packed);
+                // SAFETY: as above
+                unsafe { push_hit(data, ends, pos >> block_shift, pos as u32 | log_packed) };
                 pos += p_us;
             }
         }
@@ -641,8 +698,12 @@ pub fn sieve_over_factorbase_blocked(
 
     // --- carry positions for the small primes (p <= block_size) ---
     next_pos.clear();
-    for (&p, &roots_opt) in izip!(&factorbase[ns..split], &roots[ns..split]) {
-        if let Some((root1, root2)) = roots_opt {
+    for (&p, &root1, &root2) in izip!(
+        &factorbase[ns..split],
+        &roots.r1[ns..split],
+        &roots.r2[ns..split]
+    ) {
+        if root1 != Roots::NONE {
             let p_us = p as usize;
             next_pos.push((root1 as usize + sieve_interval_length) % p_us);
             if root2 == root1 {
@@ -693,7 +754,7 @@ pub fn sieve_over_factorbase_blocked(
             idx += 2;
         }
         // drain the large-prime hits that fall in this block
-        for &packed in &buckets[block_idx] {
+        for &packed in buckets.block(block_idx) {
             unsafe {
                 let slot = buf_ptr.add((packed & 0x00FF_FFFF) as usize);
                 *slot = (*slot).wrapping_add((packed >> 24) as u8);
@@ -748,13 +809,15 @@ mod tests {
     fn reference_sieve(
         sieve_interval_length: usize,
         factorbase: &[u32],
-        roots: &[Option<(u32, u32)>],
+        roots: &Roots,
         logs: &[u8],
     ) -> Vec<u8> {
         let total_len = 2 * sieve_interval_length;
         let mut buf = vec![0u8; total_len];
         for i in NUM_SKIP_PRIMES..factorbase.len() {
-            let Some((r1, r2)) = roots[i] else { continue };
+            let Some((r1, r2)) = roots.get(i) else {
+                continue;
+            };
             let p = factorbase[i] as usize;
             let log = logs[i];
             let mut walk = |r: u32| {
@@ -789,7 +852,7 @@ mod tests {
         let sieve_interval_length = 500usize; // total_len = 1000
         // deterministic roots; None for the skipped prefix and a couple of others to
         // exercise the skip branches, plus one forced double root.
-        let mut roots: Vec<Option<(u32, u32)>> = Vec::with_capacity(factorbase.len());
+        let mut roots = Roots::default();
         let mut seed = 0x1234_5678u64;
         for (i, &pr) in factorbase.iter().enumerate() {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -813,7 +876,7 @@ mod tests {
         let reciprocals = crate::factorbase::compute_reciprocals(&factorbase);
         let total_len = 2 * sieve_interval_length;
         let mut next_pos = Vec::new();
-        let mut buckets: Vec<Vec<u32>> = Vec::new();
+        let mut buckets = Buckets::default();
         // block sizes that are tiny (many blocks), that don't divide total_len, and
         // that exceed total_len (single block) — every prime above the size goes to
         // the buckets.

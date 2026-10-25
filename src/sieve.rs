@@ -93,7 +93,7 @@ fn run_sieve_producer(
     let mut next_pos: Vec<usize> = Vec::with_capacity(2 * factorbase.len());
     // per-block buckets of large-prime hits (packed position|log), reused across
     // polynomials
-    let mut buckets: Vec<Vec<u32>> = Vec::new();
+    let mut buckets = Buckets::default();
     // scratch integer reused by factor_over_factorbase per candidate
     let mut factor_scratch = Integer::new();
     // scratch bitset reused across candidates (cloned out only on a hit)

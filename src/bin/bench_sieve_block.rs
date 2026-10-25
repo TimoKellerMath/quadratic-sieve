@@ -55,7 +55,7 @@ fn main() {
     factorbase.extend_from_slice(&primes);
 
     // roots: for -1 and 2 we put None placeholders (the sieve code expects alignment)
-    let mut roots: Vec<Option<(u32, u32)>> = Vec::with_capacity(factorbase.len());
+    let mut roots = siqs::polynomial_generator::Roots::default();
     roots.push(None); // -1
     roots.push(None); // 2
 
@@ -80,7 +80,7 @@ fn main() {
     let total_len = 2 * sieve_interval_length;
     let mut buffer = vec![0u8; total_len];
     let mut next_pos: Vec<usize> = Vec::with_capacity(2 * factorbase.len());
-    let mut buckets: Vec<Vec<u32>> = Vec::new();
+    let mut buckets = relations::Buckets::default();
     let reciprocals = siqs::factorbase::compute_reciprocals(&factorbase);
 
     // block sizes to test

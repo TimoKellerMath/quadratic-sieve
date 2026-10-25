@@ -1,7 +1,7 @@
 use crate::constants::PREC;
 use crate::format_color::*;
 use crate::number_theory::{lift_square_root_mod_q2, modular_inverse_u32};
-use crate::polynomial_generator::Polynomial;
+use crate::polynomial_generator::{Polynomial, Roots};
 use crate::{debug_print, debug_println};
 use core::num::NonZero;
 use itertools::{Itertools, izip};
@@ -34,7 +34,7 @@ pub struct SIQSPolynomialData<'a> {
     // q_inv_mod_ps[p].is_none(), so an Option here would only double the memory
     // traffic of the per-polynomial root-update loop.
     bainv2ips: Vec<Vec<u32>>,
-    roots: Vec<Option<(u32, u32)>>, // for all p \nmid a in factorbase: (root1,root2) = (ainv * (sqrt(n mod p) - b), ainv * (-sqrt(n mod p) - b)) (mod p)
+    roots: Roots, // for all p \nmid a in factorbase: (root1,root2) = (ainv * (sqrt(n mod p) - b), ainv * (-sqrt(n mod p) - b)) (mod p)
 
     j: usize, // index of polynomial for fixed a, 1 <= j <= 2^(s-1) - 1,
     a: Integer,
@@ -87,7 +87,7 @@ impl<'a> SIQSPolynomialData<'a> {
             bainv2ips: Vec::new(), // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all p \nmid a in factorbase
             a: Integer::from(0),
             b: Integer::from(0), // the b for j,
-            roots: Vec::with_capacity(factorbase.len()),
+            roots: Roots::default(),
             n,
             factorbase,
             n_roots: roots,
@@ -350,7 +350,7 @@ impl<'a> SIQSPolynomialData<'a> {
     }
 
     // returns the next polynomial and its roots modulo the primes in the factorbase
-    pub fn next_polynomial(&mut self) -> (Polynomial<'_>, &[Option<(u32, u32)>]) {
+    pub fn next_polynomial(&mut self) -> (Polynomial<'_>, &Roots) {
         self.num_polynomials += 1;
 
         // the first polynomial has already been computed in initialize_new_set_of_polynomials()
@@ -417,8 +417,9 @@ impl<'a> SIQSPolynomialData<'a> {
                 && self.factorbase.len() == self.roots.len()
                 && self.roots.len() == self.bainv2ips[nu].len()
         );
-        for (roots, &p, q_inv, &bainv) in izip!(
-            &mut self.roots,
+        for (r1, r2, &p, q_inv, &bainv) in izip!(
+            &mut self.roots.r1,
+            &mut self.roots.r2,
             self.factorbase,
             &self.q_inv_mod_ps,
             &self.bainv2ips[nu]
@@ -427,15 +428,15 @@ impl<'a> SIQSPolynomialData<'a> {
                 // double root, i.e., we have a linear polynomial (really? it only means discriminant is 0)
                 if let Some(root) = Self::root_of_linear_polynomial_mod_p(&b, &c, p) {
                     // TODO: prime divisors of b can change (become less)
-                    *roots = Some((root, root));
+                    (*r1, *r2) = (root, root);
                     //println!("p = {p}: root = {root}");
                 } else {
-                    *roots = None;
+                    (*r1, *r2) = (Roots::NONE, Roots::NONE);
                 }
-            } else if let Some(roots_) = *roots {
+            } else if *r1 != Roots::NONE {
                 let new_roots =
-                    Self::new_roots_with_sign(roots_, bainv, p, rounded_exponent % 2 != 0);
-                *roots = Some(new_roots);
+                    Self::new_roots_with_sign((*r1, *r2), bainv, p, rounded_exponent % 2 != 0);
+                (*r1, *r2) = new_roots;
                 // check that we really have roots of (ax + b)^2 - n
                 debug_assert!(
                     (self.a.clone() * new_roots.0 * new_roots.0
