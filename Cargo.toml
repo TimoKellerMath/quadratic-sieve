@@ -21,6 +21,11 @@ strip = "none"
 lto = false
 codegen-units = 16
 
+[profile.test]
+# optimized, since unoptimized factoring tests are slow, but with debug
+# assertions on (inherited), so that the debug_assert!s are checked
+opt-level = 3
+
 [dependencies]
 fixedbitset = "0.5"
 colored_text = "0.6"

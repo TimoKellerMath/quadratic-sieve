@@ -57,8 +57,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.name }}
-      # optimized like release, but without fat LTO, so it builds quickly
-      - run: cargo test --locked --profile profiling
+      # the test profile is optimized and keeps debug assertions on
+      - run: cargo test --locked
 
   slow-tests:
     if: github.event_name == 'workflow_dispatch' && inputs.slow
