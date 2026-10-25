@@ -26,7 +26,7 @@ pub struct SIQSPolynomialData<'a> {
     prod_thread_specific_factors: Integer,
     num_factors: usize,
     list_of_qis: Vec<Vec<u32>>, // successive choices of remaining qi's
-    num_a: usize,               // the num_a-th chosen a
+    num_a: usize,               // index of the next a in list_of_qis
     bis: Vec<Integer>, // for i = 1..s: B[i] = a/q[i] * gamma, gamma = sqrt(n mod p) * (a/q[i])^-1 (mod q[i])
     q_inv_mod_ps: Vec<Option<NonZeroU32>>, //  for all p \nmid a in factorbase: (a^-1 mod p)
     // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all p \nmid a in
@@ -81,7 +81,7 @@ impl<'a> SIQSPolynomialData<'a> {
             q: Integer::from(1),
             q_inverse_mod_n: Integer::from(1),
             list_of_qis: Vec::new(),
-            num_a,           // index of current element of list_of_qis
+            num_a,           // index of the next element of list_of_qis
             bis: Vec::new(), // for i = 1..s: B[i] = a/q[i] * gamma, gamma = sqrt(n mod p) * (a/q[i])^-1 (mod q[i])
             q_inv_mod_ps: Vec::with_capacity(factorbase.len()), //  for all p \nmid a in factorbase: (a^-1 mod p)
             bainv2ips: Vec::new(), // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all p \nmid a in factorbase
@@ -240,7 +240,9 @@ impl<'a> SIQSPolynomialData<'a> {
 
     fn precompute_polynomial_data_for_q(&mut self, n: &Integer, factorbase: &[u32], roots: &[u32]) {
         debug_print!("{}", format_color("|", self.thread_number));
+        // use up the next a of the list
         let qis = &self.list_of_qis[self.num_a];
+        self.num_a += 1;
         self.q = product_u32_to_integer(qis);
         self.a = self.q.square_ref().complete();
         self.q_inverse_mod_n = self.q.invert_ref(n).unwrap().complete();
@@ -386,7 +388,6 @@ impl<'a> SIQSPolynomialData<'a> {
             let c = (b.square_ref().complete() - self.n).div_exact(&self.a);
             debug_assert_eq!(b.clone().square() - self.a.clone() * c.clone(), *self.n);
             self.j = 1;
-            self.num_a += 1;
             return (
                 Polynomial {
                     a: &self.a,
@@ -605,6 +606,30 @@ mod tests {
             before, after,
             "advancing window_offset did not change the generated a coefficients"
         );
+    }
+
+    // The first switch to a new a must not rebuild the a the constructor already
+    // used, which would sieve its whole family of polynomials a second time.
+    #[test]
+    fn test_polynomials_do_not_repeat() {
+        let n = "6427752177035961102167848371107669985402627402189138248671463"
+            .parse::<Integer>()
+            .unwrap();
+        let factorbase = make_factorbase(&n, 1500);
+        let roots = square_roots_mod_factorbase(&n, &factorbase);
+        let mut generators =
+            new_polynomial_generators(&n, 65536, 1, &factorbase, &roots, &factorbase);
+        let generator = &mut generators[0];
+        // three families of 2^(num_factors - 1) polynomials each
+        let count = 3 << (generator.num_factors - 1);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..count {
+            let (polynomial, _) = generator.next_polynomial();
+            assert!(
+                seen.insert((polynomial.a.clone(), polynomial.b.clone())),
+                "polynomial {i} repeats an earlier one"
+            );
+        }
     }
 
     // Small N: the factor base is short and the ideal q is tiny, so the
