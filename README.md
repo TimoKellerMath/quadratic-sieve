@@ -22,8 +22,7 @@ on multiple threads.
 ## Requirements
 
 - Rust (stable, edition 2024)
-- GMP and MPFR as system libraries, e.g. `apt install libgmp-dev libmpfr-dev`
-  or `pacman -S gmp mpfr`
+- GMP as a system library, e.g. `apt install libgmp-dev` or `pacman -S gmp`
 
 `.cargo/config.toml` builds for the native CPU (`target-cpu=native`), so
 binaries may not run on other machines.

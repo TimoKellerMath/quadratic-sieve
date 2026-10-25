@@ -35,4 +35,4 @@ features = ["use-system-libs"]
 [dependencies.rug]
 version = "1.28"
 default-features = false
-features = ["integer", "std", "float"]
+features = ["integer", "std"]

@@ -1,11 +1,10 @@
-use crate::constants::PREC;
 use crate::format_color::*;
 use crate::number_theory::{lift_square_root_mod_q2, modular_inverse_u32};
 use crate::polynomial_generator::{Polynomial, Roots};
 use crate::{debug_print, debug_println};
 use core::num::NonZero;
 use itertools::{Itertools, izip};
-use rug::{Complete, Float, Integer};
+use rug::{Complete, Integer};
 use std::num::NonZeroU32;
 
 #[inline]
@@ -47,7 +46,7 @@ pub struct SIQSPolynomialData<'a> {
     n_roots: &'a [u32], // the roots of n modulo the primes in the factor base
     //sieve_interval_length: u64,
     prime_factors_for_q: &'a [u32], // we choose the q from this subset of the factorbase
-    total_q_size: Float,            // target size of a = q^2, used to regenerate list_of_qis
+    total_q_size: f64,              // target size of a = q^2, used to regenerate list_of_qis
     window_offset: usize,           // shift of the prime window when regenerating fresh a's
     pub num_polynomials: usize,     // record the number of polynomials used
 }
@@ -68,9 +67,7 @@ impl<'a> SIQSPolynomialData<'a> {
     ) -> SIQSPolynomialData<'a> {
         // compute size of "average" qi
         // q \approx sqrt((sqrt(2 * kn)/sieve_interval_length)
-        let total_q_size = ((2f32 * Float::with_val(PREC, n.clone())).sqrt()
-            / Float::with_val(PREC, sieve_interval_length))
-        .sqrt();
+        let total_q_size = ((2.0 * n.to_f64()).sqrt() / sieve_interval_length as f64).sqrt();
         let mut polynomial_data = SIQSPolynomialData {
             thread_number,
             j: 0, // index of polynomial for fixed a, 1 <= j <= 2^(s-1) - 1,
@@ -92,11 +89,11 @@ impl<'a> SIQSPolynomialData<'a> {
             factorbase,
             n_roots: roots,
             prime_factors_for_q,
-            total_q_size: total_q_size.clone(),
+            total_q_size,
             window_offset: 0,
             num_polynomials: 0,
         };
-        polynomial_data.compute_list_of_factors_of_q(&total_q_size, prime_factors_for_q);
+        polynomial_data.compute_list_of_factors_of_q(total_q_size, prime_factors_for_q);
         polynomial_data.precompute_polynomial_data_for_q(n, factorbase, roots);
         debug_println!(
             "thread #{thread_number}: {} + {} = {} factors",
@@ -108,15 +105,13 @@ impl<'a> SIQSPolynomialData<'a> {
         polynomial_data
     }
 
-    fn compute_average_size_of_q(&self, total_q_size: &Float, s: usize) -> f32 {
-        (total_q_size.clone() / Float::with_val(PREC, self.prod_thread_specific_factors.clone()))
-            .root(s as u32)
-            .to_f32()
+    fn compute_average_size_of_q(&self, total_q_size: f64, s: usize) -> f32 {
+        (total_q_size / self.prod_thread_specific_factors.to_f64()).powf(1.0 / s as f64) as f32
     }
 
     fn compute_number_of_factors_of_q(
         &self,
-        total_q_size: &Float,
+        total_q_size: f64,
         prime_factors_for_q: &[u32],
     ) -> (usize, usize) {
         // fixed number of factors: 5
@@ -159,7 +154,7 @@ impl<'a> SIQSPolynomialData<'a> {
         }
     }
 
-    fn compute_list_of_factors_of_q(&mut self, total_q_size: &Float, prime_factors_for_q: &[u32]) {
+    fn compute_list_of_factors_of_q(&mut self, total_q_size: f64, prime_factors_for_q: &[u32]) {
         let (s, i) = self.compute_number_of_factors_of_q(total_q_size, prime_factors_for_q);
         self.s = s;
         self.num_factors = s + self.thread_specific_factors.len();
@@ -192,7 +187,7 @@ impl<'a> SIQSPolynomialData<'a> {
             .combinations(s);
         const SCALE: f32 = 65536.0;
         let prod_thread_specific_factors = self.prod_thread_specific_factors.to_f32();
-        let total_q_size = total_q_size.to_f32();
+        let total_q_size = total_q_size as f32;
         let quotient = prod_thread_specific_factors / total_q_size;
         let qis_with_quality = combinations.into_iter().map(|combination| {
             (
@@ -213,7 +208,6 @@ impl<'a> SIQSPolynomialData<'a> {
                 new_qis.push(*q);
             }
             //let q = product_u32_to_integer(&new_qis);
-            //let quality = (Float::with_val(PREC,q) / Float::with_val(PREC,total_q_size)).log2().abs();
             //println!("quality: {quality}");
             self.list_of_qis.push(new_qis);
         }
@@ -378,9 +372,8 @@ impl<'a> SIQSPolynomialData<'a> {
                 // towards larger primes and regenerate a fresh batch of a's instead
                 // of aborting the whole factorization.
                 self.window_offset += Self::Q_RANGE;
-                let total_q_size = self.total_q_size.clone();
                 let prime_factors_for_q = self.prime_factors_for_q;
-                self.compute_list_of_factors_of_q(&total_q_size, prime_factors_for_q);
+                self.compute_list_of_factors_of_q(self.total_q_size, prime_factors_for_q);
                 self.num_a = 0;
             }
             self.precompute_polynomial_data_for_q(self.n, self.factorbase, self.n_roots);
@@ -598,9 +591,8 @@ mod tests {
 
         // Simulate exhaustion: advance the window and regenerate (as the new
         // branch in next_polynomial does) and confirm we get different a's.
-        let total_q_size = generator.total_q_size.clone();
         generator.window_offset += SIQSPolynomialData::Q_RANGE;
-        generator.compute_list_of_factors_of_q(&total_q_size, &factorbase);
+        generator.compute_list_of_factors_of_q(generator.total_q_size, &factorbase);
         let after = generator.list_of_qis.clone();
 
         assert_ne!(
