@@ -16,12 +16,20 @@ fn sieve_profile_enabled() -> bool {
     *ON.get_or_init(|| std::env::var("SIQS_PROFILE").is_ok())
 }
 
+/// The scratch of [`sieve_over_factorbase_blocked`]: the carry positions of the small
+/// primes and the buckets of the large primes. Owned by the caller so that the
+/// allocations are reused across polynomials.
+#[derive(Default)]
+pub struct SieveScratch {
+    next_pos: Vec<usize>,
+    buckets: Buckets,
+}
+
 /// Per-block buckets of large-prime hits for [`sieve_over_factorbase_blocked`], in one
 /// flat array: bucket `b` occupies `data[b * stride..ends[b]]`. The stride covers every
-/// hit a block can get, so the fill needs no capacity or bounds checks. Owned by the
-/// caller so that the allocation is reused across polynomials.
+/// hit a block can get, so the fill needs no capacity or bounds checks.
 #[derive(Default)]
-pub struct Buckets {
+struct Buckets {
     data: Vec<u32>,
     ends: Vec<usize>,
     stride: usize,
@@ -80,27 +88,25 @@ unsafe fn push_hit(data: *mut u32, ends: *mut usize, block: usize, entry: u32) {
 /// - `sieve_interval_length`: half the window length (total_len = 2 * sieve_interval_length)
 /// - `factorbase`, `roots`, `logs`: same layout as existing code; `factorbase` sorted ascending
 /// - `logs_for_polynomial`: caller‑owned buffer with length == 2 * sieve_interval_length
-/// - `next_pos`: caller‑owned scratch reused across calls (carry positions for small primes)
-/// - `buckets`: caller‑owned scratch reused across calls; one bucket per block for the
-///   large primes, each entry a packed `position | log << 24` word (total_len < 2^24,
-///   which the largest tabulated sieve size satisfies). Halving the entry size keeps
-///   the fill's write traffic — the bulk of the sieve setup — cache-resident longer.
-///   Allocations are reused; contents are reset each call.
+/// - `scratch`: caller‑owned, reused across calls: the carry positions for the small
+///   primes, and one bucket per block for the large primes, each entry a packed
+///   `position | log << 24` word (total_len < 2^24, which the largest tabulated sieve
+///   size satisfies). Halving the entry size keeps the fill's write traffic — the
+///   bulk of the sieve setup — cache-resident longer. Contents are reset each call.
 /// - `block_size`: block size in elements, a power of two (positions map to blocks by
 ///   a shift); one larger than the window gives a single block
 ///
 /// Returns sum of small logs (same as other variants).
-#[allow(clippy::too_many_arguments)]
 pub fn sieve_over_factorbase_blocked(
     sieve_interval_length: usize,
     factorbase: &[u32],
     roots: &Roots,
     logs: &[u8],
     logs_for_polynomial: &mut [u8],
-    next_pos: &mut Vec<usize>,
-    buckets: &mut Buckets,
+    scratch: &mut SieveScratch,
     block_size: usize,
 ) -> u32 {
+    let SieveScratch { next_pos, buckets } = scratch;
     debug_assert_eq!(factorbase.len(), roots.len());
     debug_assert_eq!(factorbase.len(), logs.len());
     let total_len = 2usize * sieve_interval_length;
@@ -318,8 +324,7 @@ mod tests {
 
         let want = reference_sieve(sieve_interval_length, &factorbase, &roots, &logs);
         let total_len = 2 * sieve_interval_length;
-        let mut next_pos = Vec::new();
-        let mut buckets = Buckets::default();
+        let mut scratch = SieveScratch::default();
         // block sizes that are tiny (many blocks), that don't divide total_len, and
         // that exceed total_len (single block) — every prime above the size goes to
         // the buckets.
@@ -331,8 +336,7 @@ mod tests {
                 &roots,
                 &logs,
                 &mut buf,
-                &mut next_pos,
-                &mut buckets,
+                &mut scratch,
                 block_size,
             );
             assert_eq!(buf, want, "mismatch at block_size = {block_size}");

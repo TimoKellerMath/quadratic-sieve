@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use rug::Integer;
 
 use crate::block_sieve::{
-    Buckets, SIEVE_CALLS, SIEVE_LOOP_NANOS, SIEVE_SETUP_NANOS, sieve_over_factorbase_blocked,
+    SIEVE_CALLS, SIEVE_LOOP_NANOS, SIEVE_SETUP_NANOS, SieveScratch, sieve_over_factorbase_blocked,
 };
 use crate::debug_print;
 use crate::factorbase::*;
@@ -18,7 +18,7 @@ use crate::multiplier::*;
 use crate::number_theory::*;
 use crate::relation::Relation;
 use crate::siqs_generator::*;
-use crate::trial_division::factor_over_factorbase;
+use crate::trial_division::TrialDivision;
 
 /// A full or partial relation sent from a producer (sieving) thread to the
 /// consumer, with the index of the producer.
@@ -72,41 +72,120 @@ fn use_global_threshold() -> bool {
     *GLOBAL.get_or_init(|| std::env::var("SIQS_GLOBAL_THRESHOLD").is_ok())
 }
 
+/// The inputs of the sieving threads, computed once from n and shared read-only.
+struct SieveParams {
+    // the multiplier k, and kn
+    k: u32,
+    kn: Integer,
+    // the factor base (including the primes dividing k), and the rounded logs, the
+    // Barrett reciprocals and the square roots of kn modulo its primes
+    factorbase: Vec<u32>,
+    logs: Vec<u8>,
+    reciprocals: Vec<u64>,
+    square_roots: Vec<u32>,
+    // the factor base without the primes dividing k, from which a is built
+    factorbase_without_k: Vec<u32>,
+    sieve_interval_length: usize,
+    large_prime_multiplier: u32,
+    use_dlp: bool,
+    // large-prime slack in bits: how much non-smooth cofactor a candidate may keep
+    lp_slack: u32,
+}
+
+impl SieveParams {
+    fn new(n: &Integer) -> Result<SieveParams, NumberTheoryError> {
+        let k = compute_multiplier(n)?;
+        println!("k = {k}");
+        let kn: Integer = n.clone() * k;
+        // heuristic value for the factor base
+        let log2_kn = (kn.significant_bits() + 1) as usize;
+        let (factorbase_size, sieve_interval_length, large_prime_multiplier) =
+            compute_sieve_parameters(log2_kn);
+        println!("factor base size: {factorbase_size}");
+        let factorbase_without_k = make_factorbase(&kn, factorbase_size);
+        // add prime factors of multiplier k to factor base
+        let prime_divisors_of_multiplier = SMALL_PRIMES
+            .iter()
+            .filter(|&&p| k.is_multiple_of(p))
+            .copied();
+        let mut factorbase = factorbase_without_k.clone();
+        factorbase.extend(prime_divisors_of_multiplier);
+        factorbase.sort_unstable();
+        factorbase.dedup();
+        let square_roots = square_roots_mod_factorbase(&kn, &factorbase);
+        let logs = compute_logs(&factorbase);
+        // Barrett reciprocals for the resieve step's per-prime `x mod p`.
+        let reciprocals = compute_reciprocals(&factorbase);
+        // double large prime variation: only worthwhile for larger N, where non-smooth
+        // cofactors are big enough that admitting two large primes pays for the extra
+        // primality test / Pollard-rho split and the larger partial-relation graph.
+        let n_bits = n.significant_bits();
+        let use_dlp = n_bits > 250;
+        println!("double large prime: {use_dlp}");
+        let lp_slack = lp_slack_bits(
+            use_dlp,
+            n_bits,
+            *logs.last().unwrap() as u32,
+            large_prime_multiplier,
+        );
+        println!(
+            "lp slack multiplier: {:.2} ({lp_slack} bits)",
+            lp_slack_multiplier(use_dlp, n_bits),
+        );
+        Ok(SieveParams {
+            k,
+            kn,
+            factorbase,
+            logs,
+            reciprocals,
+            square_roots,
+            factorbase_without_k,
+            sieve_interval_length,
+            large_prime_multiplier,
+            use_dlp,
+            lp_slack,
+        })
+    }
+
+    // one polynomial generator per sieving thread
+    fn polynomial_generators(&self, num_threads: usize) -> Vec<SIQSPolynomialData<'_>> {
+        new_polynomial_generators(
+            &self.kn,
+            self.sieve_interval_length as u64,
+            num_threads,
+            &self.factorbase,
+            &self.square_roots,
+            &self.factorbase_without_k,
+        )
+    }
+}
+
 /// One producer thread: repeatedly sieve a polynomial, scan for survivors, factor
 /// each over the factor base, and send the resulting (partial) relations to the
 /// consumer. Shared by [`quadratic_sieve_multithreaded`] and
 /// [`quadratic_sieve_lanczos`] so the sieving hot path has a single definition.
-#[allow(clippy::too_many_arguments)]
 fn run_sieve_producer(
     index_thread: usize,
     polynomial_generator: &mut SIQSPolynomialData,
-    logs: &[u8],
-    factorbase: &[u32],
-    reciprocals: &[u64],
-    kn: &Integer,
-    sieve_interval_length: usize,
-    kn_bits: u32,
-    k: u32,
-    large_prime_multiplier: u32,
-    use_dlp: bool,
-    // large-prime slack in bits: how much non-smooth cofactor a candidate may keep.
-    // Computed once by the entry function via lp_slack_bits (it depends on n's size).
-    lp_slack: u32,
+    params: &SieveParams,
     sender: &mpsc::Sender<RelationMsg>,
 ) {
+    let sieve_interval_length = params.sieve_interval_length;
+    let kn_bits = params.kn.significant_bits();
     let mut logs_for_polynomial = vec![0u8; 2 * sieve_interval_length];
     // scratch reused across polynomials by the blocked sieve
-    let mut next_pos: Vec<usize> = Vec::with_capacity(2 * factorbase.len());
-    // per-block buckets of large-prime hits (packed position|log), reused across
-    // polynomials
-    let mut buckets = Buckets::default();
-    // scratch integer reused by factor_over_factorbase per candidate
-    let mut factor_scratch = Integer::new();
-    // factor indices of a candidate, reused across candidates (cloned out on a hit)
-    let mut factors_scratch = Vec::new();
-    // scratch (u, v) reused across candidates; cloned out only on a hit
-    let mut u_scratch = Integer::new();
-    let mut v_scratch = Integer::new();
+    let mut sieve_scratch = SieveScratch::default();
+    // positions of a polynomial's candidates, reused across polynomials
+    let mut candidates = Vec::new();
+    let mut trial_division = TrialDivision::new(
+        &params.factorbase,
+        &params.reciprocals,
+        params.k,
+        params.large_prime_multiplier,
+        params.use_dlp,
+    );
+    // Q(x) of a candidate, reused across candidates; cloned out only on a hit
+    let mut v = Integer::new();
 
     // SIQS_PROFILE: thread 0 periodically prints a per-phase time breakdown
     let profile = std::env::var("SIQS_PROFILE").is_ok() && index_thread == 0;
@@ -130,12 +209,11 @@ fn run_sieve_producer(
         let prof_t1 = Instant::now();
         let sum_small_logs = sieve_over_factorbase_blocked(
             sieve_interval_length,
-            factorbase,
+            &params.factorbase,
             roots,
-            logs,
+            &params.logs,
             &mut logs_for_polynomial,
-            &mut next_pos,
-            &mut buckets,
+            &mut sieve_scratch,
             BLOCK_SIZE,
         );
         // Per-block thresholds: log2|Q(x)| is not flat over the interval — it is
@@ -153,8 +231,8 @@ fn run_sieve_producer(
         let prof_t2 = Instant::now();
         let total = logs_for_polynomial.len();
         const SCAN_BLOCK: usize = 16384;
-        let mut block_start = 0usize;
-        while block_start < total {
+        candidates.clear();
+        for block_start in (0..total).step_by(SCAN_BLOCK) {
             let block_end = (block_start + SCAN_BLOCK).min(total);
             let x_mid = (block_start + block_end) as f64 / 2.0 - sieve_interval_length as f64;
             let q_mid = (a_f * x_mid + 2.0 * b_f) * x_mid + c_f;
@@ -167,93 +245,32 @@ fn run_sieve_producer(
                 log2_kn_over_a
             };
             let threshold: u8 = q_bits
-                .saturating_sub(lp_slack)
+                .saturating_sub(params.lp_slack)
                 .saturating_sub(sum_small_logs)
                 .clamp(1, u8::MAX as u32) as u8;
-            let mut i = block_start;
-            // SAFETY: AVX2 is enabled at compile time, and each load reads the 32
-            // bytes at i with i + 32 <= block_end <= total, the buffer length
-            #[cfg(target_feature = "avx2")]
-            unsafe {
-                use std::arch::x86_64::*;
-                let thr_vec = _mm256_set1_epi8(threshold as i8);
-                let ptr = logs_for_polynomial.as_ptr();
-                while i + 32 <= block_end {
-                    let chunk = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
-                    // unsigned: chunk >= threshold  iff  max(chunk, thr) == chunk
-                    let maxv = _mm256_max_epu8(chunk, thr_vec);
-                    let eq = _mm256_cmpeq_epi8(maxv, chunk);
-                    let mask = _mm256_movemask_epi8(eq) as u32;
-                    if mask != 0 {
-                        let mut m = mask;
-                        while m != 0 {
-                            let j = m.trailing_zeros() as usize;
-                            m &= m - 1;
-                            let idx = i + j;
-                            let x = (idx as i32) - (sieve_interval_length as i32);
-                            prof_candidates += 1;
-                            polynomial.evaluate(x, kn, &mut u_scratch, &mut v_scratch);
-                            if let Some((factors, large_primes)) = factor_over_factorbase(
-                                x,
-                                &v_scratch,
-                                factorbase,
-                                roots,
-                                reciprocals,
-                                k,
-                                large_prime_multiplier,
-                                use_dlp,
-                                &mut factor_scratch,
-                                &mut factors_scratch,
-                            ) {
-                                prof_relations[large_primes.count()] += 1;
-                                let relation = Relation {
-                                    u: u_scratch.clone(),
-                                    v: v_scratch.clone(),
-                                    factors,
-                                    large_primes,
-                                };
-                                if sender.send((relation, index_thread)).is_err() {
-                                    break 'outer_loop;
-                                }
-                            }
-                        }
-                    }
-                    i += 32;
+            find_candidates(
+                &logs_for_polynomial[block_start..block_end],
+                threshold,
+                block_start,
+                &mut candidates,
+            );
+        }
+        prof_candidates += candidates.len() as u64;
+        for &i in &candidates {
+            let x = (i as i32) - (sieve_interval_length as i32);
+            polynomial.evaluate(x, &mut v);
+            if let Some((factors, large_primes)) = trial_division.factor(x, &v, roots) {
+                prof_relations[large_primes.count()] += 1;
+                let relation = Relation {
+                    u: polynomial.sqrt_mod(x, &params.kn),
+                    v: v.clone(),
+                    factors,
+                    large_primes,
+                };
+                if sender.send((relation, index_thread)).is_err() {
+                    break 'outer_loop;
                 }
             }
-            while i < block_end {
-                let log = logs_for_polynomial[i];
-                if log >= threshold {
-                    let x = (i as i32) - (sieve_interval_length as i32);
-                    prof_candidates += 1;
-                    polynomial.evaluate(x, kn, &mut u_scratch, &mut v_scratch);
-                    if let Some((factors, large_primes)) = factor_over_factorbase(
-                        x,
-                        &v_scratch,
-                        factorbase,
-                        roots,
-                        reciprocals,
-                        k,
-                        large_prime_multiplier,
-                        use_dlp,
-                        &mut factor_scratch,
-                        &mut factors_scratch,
-                    ) {
-                        prof_relations[large_primes.count()] += 1;
-                        let relation = Relation {
-                            u: u_scratch.clone(),
-                            v: v_scratch.clone(),
-                            factors,
-                            large_primes,
-                        };
-                        if sender.send((relation, index_thread)).is_err() {
-                            break 'outer_loop;
-                        }
-                    }
-                }
-                i += 1;
-            }
-            block_start = block_end;
         }
         if profile {
             prof_polys += 1;
@@ -283,77 +300,74 @@ fn run_sieve_producer(
     }
 }
 
+/// Appends `offset + i` to `candidates` for every position `i` whose sieve value
+/// `logs[i]` reaches `threshold`, in increasing order.
+#[cfg(target_feature = "avx2")]
+fn find_candidates(logs: &[u8], threshold: u8, offset: usize, candidates: &mut Vec<usize>) {
+    use std::arch::x86_64::*;
+    let (chunks, tail) = logs.as_chunks::<32>();
+    // SAFETY: AVX2 is enabled at compile time, and each load reads the 32 bytes of
+    // its chunk
+    unsafe {
+        let thresholds = _mm256_set1_epi8(threshold as i8);
+        for (c, chunk) in chunks.iter().enumerate() {
+            let chunk = _mm256_loadu_si256(chunk.as_ptr().cast());
+            // unsigned: chunk >= threshold  iff  max(chunk, threshold) == chunk
+            let reached = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, thresholds), chunk);
+            let mut mask = _mm256_movemask_epi8(reached) as u32;
+            while mask != 0 {
+                candidates.push(offset + 32 * c + mask.trailing_zeros() as usize);
+                mask &= mask - 1;
+            }
+        }
+    }
+    find_candidates_scalar(
+        tail,
+        threshold,
+        offset + logs.len() - tail.len(),
+        candidates,
+    );
+}
+
+#[cfg(not(target_feature = "avx2"))]
+fn find_candidates(logs: &[u8], threshold: u8, offset: usize, candidates: &mut Vec<usize>) {
+    find_candidates_scalar(logs, threshold, offset, candidates);
+}
+
+/// [`find_candidates`] without SIMD: for builds without AVX2, and for the tail.
+fn find_candidates_scalar(logs: &[u8], threshold: u8, offset: usize, candidates: &mut Vec<usize>) {
+    for (i, &log) in logs.iter().enumerate() {
+        if log >= threshold {
+            candidates.push(offset + i);
+        }
+    }
+}
+
 pub fn quadratic_sieve_multithreaded(
     n: &Integer,
     num_threads: usize,
 ) -> Result<Option<Integer>, NumberTheoryError> {
-    let k = compute_multiplier(n)?;
-    println!("k = {k}");
-    let kn: Integer = n.clone() * k;
-    // heuristic value for the factor base
-    let log2_kn = (kn.significant_bits() + 1) as usize;
-    let (factorbase_size, sieve_interval_length, large_prime_multiplier) =
-        compute_sieve_parameters(log2_kn);
-    println!("factor base size: {factorbase_size}");
-    let factorbase_without_k = make_factorbase(&kn, factorbase_size);
-    // add prime factors of multiplier k to factor base
-    let prime_divisors_of_multiplier = SMALL_PRIMES
-        .iter()
-        .filter(|&&p| k.is_multiple_of(p))
-        .copied();
-    let mut factorbase = factorbase_without_k.clone();
-    factorbase.extend(prime_divisors_of_multiplier);
-    factorbase.sort_unstable();
-    factorbase.dedup();
-    let square_roots = square_roots_mod_factorbase(&kn, &factorbase);
-    let mut polynomial_generators = new_polynomial_generators(
-        &kn,
-        sieve_interval_length as u64,
-        num_threads,
-        &factorbase,
-        &square_roots,
-        &factorbase_without_k,
-    );
-    let logs = Arc::new(compute_logs(&factorbase));
-    // Barrett reciprocals for the resieve step's per-prime `x mod p`.
-    let reciprocals = Arc::new(compute_reciprocals(&factorbase));
-    let factorbase = Arc::new(factorbase.clone());
-    let kn_bits = kn.significant_bits();
-    // double large prime variation: only worthwhile for larger N, where non-smooth
-    // cofactors are big enough that admitting two large primes pays for the extra
-    // primality test / Pollard-rho split and the larger partial-relation graph.
-    let n_bits = n.significant_bits();
-    let use_dlp = n_bits > 250;
-    println!("double large prime: {use_dlp}");
-    let lp_slack = lp_slack_bits(
-        use_dlp,
-        n_bits,
-        *logs.last().unwrap() as u32,
-        large_prime_multiplier,
-    );
-    println!(
-        "lp slack multiplier: {:.2} ({lp_slack} bits)",
-        lp_slack_multiplier(use_dlp, n_bits),
-    );
+    let params = SieveParams::new(n)?;
+    let mut polynomial_generators = params.polynomial_generators(num_threads);
     let n = Arc::new(n);
-    let kn = Arc::new(kn.clone());
     let shared_factor = Arc::new(Mutex::new(None));
     rayon::scope(|s| {
         let (sender, receiver) = mpsc::channel::<RelationMsg>();
         // consumer thread: processes (partial) relations
         {
             let shared_factor = Arc::clone(&shared_factor);
-            let factorbase = Arc::clone(&factorbase);
             let n = Arc::clone(&n);
+            let params = &params;
             s.spawn(move |_| {
+                let factorbase_size = params.factorbase.len();
                 // set up matrix for relations over the factorbase
-                let mut relations = Relations::new(factorbase.len());
+                let mut relations = Relations::new(factorbase_size);
                 // combines (partial) relations into full ones: a single-prime hash map
                 // without the double large prime variation, the cycle graph with it
-                let mut partial_relations = PartialStore::new(use_dlp);
+                let mut partial_relations = PartialStore::new(params.use_dlp);
                 // time each 10% progress step (same step as add_relation's `(k)` report)
                 // and flag the slow ones. `step` mirrors Relations::add_relation.
-                let progress_step = (factorbase.len() / 10).max(1);
+                let progress_step = (factorbase_size / 10).max(1);
                 let mut last_step_time = Instant::now();
 
                 loop {
@@ -412,21 +426,7 @@ pub fn quadratic_sieve_multithreaded(
             });
         }
 
-        spawn_sieve_producers(
-            s,
-            &mut polynomial_generators,
-            &logs,
-            &factorbase,
-            &reciprocals,
-            &kn,
-            sieve_interval_length,
-            kn_bits,
-            k,
-            large_prime_multiplier,
-            use_dlp,
-            lp_slack,
-            &sender,
-        );
+        spawn_sieve_producers(s, &mut polynomial_generators, &params, &sender);
         // drop the original sender so the consumer's recv() terminates once every
         // producer (each holding a clone) has exited.
         drop(sender);
@@ -435,45 +435,17 @@ pub fn quadratic_sieve_multithreaded(
 }
 
 /// Spawn one producer thread per polynomial generator into the rayon scope, each
-/// cloning the shared inputs and the relation sender. Shared by both solvers.
-#[allow(clippy::too_many_arguments)]
+/// with a clone of the relation sender. Shared by both solvers.
 fn spawn_sieve_producers<'scope, 'env>(
     s: &rayon::Scope<'scope>,
     polynomial_generators: &'scope mut [SIQSPolynomialData<'env>],
-    logs: &'scope Arc<Vec<u8>>,
-    factorbase: &'scope Arc<Vec<u32>>,
-    reciprocals: &'scope Arc<Vec<u64>>,
-    kn: &'scope Arc<Integer>,
-    sieve_interval_length: usize,
-    kn_bits: u32,
-    k: u32,
-    large_prime_multiplier: u32,
-    use_dlp: bool,
-    lp_slack: u32,
+    params: &'scope SieveParams,
     sender: &mpsc::Sender<RelationMsg>,
 ) {
     for (index_thread, polynomial_generator) in polynomial_generators.iter_mut().enumerate() {
-        let logs = Arc::clone(logs);
-        let factorbase = Arc::clone(factorbase);
-        let reciprocals = Arc::clone(reciprocals);
-        let kn = Arc::clone(kn);
         let sender = sender.clone();
         s.spawn(move |_| {
-            run_sieve_producer(
-                index_thread,
-                polynomial_generator,
-                &logs,
-                &factorbase,
-                &reciprocals,
-                &kn,
-                sieve_interval_length,
-                kn_bits,
-                k,
-                large_prime_multiplier,
-                use_dlp,
-                lp_slack,
-                &sender,
-            );
+            run_sieve_producer(index_thread, polynomial_generator, params, &sender);
         });
     }
 }
@@ -500,75 +472,33 @@ pub fn quadratic_sieve_lanczos(
     // fixed seed for the randomized starting block, for reproducible runs
     const LANCZOS_SEED: u64 = 0x5161_7A9F_2C3D_4E5F;
 
-    let k = compute_multiplier(n)?;
-    println!("k = {k}");
-    let kn: Integer = n.clone() * k;
-    // heuristic value for the factor base
-    let log2_kn = (kn.significant_bits() + 1) as usize;
-    let (factorbase_size, sieve_interval_length, large_prime_multiplier) =
-        compute_sieve_parameters(log2_kn);
-    println!("factor base size: {factorbase_size}");
-    let factorbase_without_k = make_factorbase(&kn, factorbase_size);
-    // add prime factors of multiplier k to factor base
-    let prime_divisors_of_multiplier = SMALL_PRIMES
-        .iter()
-        .filter(|&&p| k.is_multiple_of(p))
-        .copied();
-    let mut factorbase = factorbase_without_k.clone();
-    factorbase.extend(prime_divisors_of_multiplier);
-    factorbase.sort_unstable();
-    factorbase.dedup();
-    let square_roots = square_roots_mod_factorbase(&kn, &factorbase);
-    let mut polynomial_generators = new_polynomial_generators(
-        &kn,
-        sieve_interval_length as u64,
-        num_threads,
-        &factorbase,
-        &square_roots,
-        &factorbase_without_k,
-    );
-    let logs = Arc::new(compute_logs(&factorbase));
-    let reciprocals = Arc::new(compute_reciprocals(&factorbase));
-    let factorbase = Arc::new(factorbase.clone());
-    let kn_bits = kn.significant_bits();
-    let n_bits = n.significant_bits();
-    let use_dlp = n_bits > 250;
-    println!("double large prime: {use_dlp}");
-    let lp_slack = lp_slack_bits(
-        use_dlp,
-        n_bits,
-        *logs.last().unwrap() as u32,
-        large_prime_multiplier,
-    );
-    println!(
-        "lp slack multiplier: {:.2} ({lp_slack} bits)",
-        lp_slack_multiplier(use_dlp, n_bits),
-    );
+    let params = SieveParams::new(n)?;
+    let mut polynomial_generators = params.polynomial_generators(num_threads);
     let n = Arc::new(n);
-    let kn = Arc::new(kn.clone());
     let shared_factor = Arc::new(Mutex::new(None));
     rayon::scope(|s| {
         let (sender, receiver) = mpsc::channel::<RelationMsg>();
         // consumer thread: combine partials, accumulate full relations, then solve
         {
             let shared_factor = Arc::clone(&shared_factor);
-            let factorbase = Arc::clone(&factorbase);
             let n = Arc::clone(&n);
+            let params = &params;
             s.spawn(move |_| {
+                let factorbase_size = params.factorbase.len();
                 // combines (partial) relations into full ones (shared, global state)
-                let mut partial_relations = PartialStore::new(use_dlp);
+                let mut partial_relations = PartialStore::new(params.use_dlp);
                 // full relations collected sparsely for the batch linear algebra
-                let mut sparse = SparseRelations::new(factorbase.len());
+                let mut sparse = SparseRelations::new(factorbase_size);
                 // which factor-base primes have actually appeared: the matrix only
                 // needs a surplus over *these*, not over the full factor base (for
                 // small N most large primes never divide any Q(x)).
-                let mut appeared = vec![false; factorbase.len()];
+                let mut appeared = vec![false; factorbase_size];
                 let mut appeared_count = 0usize;
 
                 // progress: report every 10% of the (estimated) max relations needed.
                 // The actual target is appeared_count + RELATION_SURPLUS; appeared_count
                 // is bounded by the factor base, so this is the upper bound.
-                let max_relations = factorbase.len() + RELATION_SURPLUS;
+                let max_relations = factorbase_size + RELATION_SURPLUS;
                 let progress_step = (max_relations / 10).max(1);
                 let collection_start = Instant::now();
                 // time each 10% step so slow ones can be flagged
@@ -647,21 +577,7 @@ pub fn quadratic_sieve_lanczos(
             });
         }
 
-        spawn_sieve_producers(
-            s,
-            &mut polynomial_generators,
-            &logs,
-            &factorbase,
-            &reciprocals,
-            &kn,
-            sieve_interval_length,
-            kn_bits,
-            k,
-            large_prime_multiplier,
-            use_dlp,
-            lp_slack,
-            &sender,
-        );
+        spawn_sieve_producers(s, &mut polynomial_generators, &params, &sender);
         drop(sender);
     });
     Ok(shared_factor.lock().unwrap().clone())
@@ -670,6 +586,39 @@ pub fn quadratic_sieve_lanczos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // the signature of find_candidates
+    type Scan = fn(&[u8], u8, usize, &mut Vec<usize>);
+
+    // Both scans find exactly the positions at or above the threshold, also for
+    // thresholds of 128 and more, where a signed byte comparison would fail, and in
+    // a tail shorter than a SIMD vector.
+    #[test]
+    fn scans_find_the_positions_reaching_the_threshold() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let logs: Vec<u8> = (0..1000)
+            .map(|_| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (seed >> 56) as u8
+            })
+            .collect();
+        let offset = 12345;
+        let scans: [Scan; 2] = [find_candidates, find_candidates_scalar];
+        for threshold in [0, 1, 50, 127, 128, 129, 200, 255] {
+            let want: Vec<usize> = (0..logs.len())
+                .filter(|&i| logs[i] >= threshold)
+                .map(|i| offset + i)
+                .collect();
+            for (s, scan) in scans.iter().enumerate() {
+                let mut got = vec![0];
+                scan(&logs, threshold, offset, &mut got);
+                assert_eq!(got[0], 0, "scan {s} must append");
+                assert_eq!(got[1..], want, "scan {s}, threshold {threshold}");
+            }
+        }
+    }
 
     #[test]
     fn lp_slack_defaults() {

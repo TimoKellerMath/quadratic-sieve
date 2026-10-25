@@ -59,7 +59,6 @@ impl<'a> SIQSPolynomialData<'a> {
     fn initialize_new_set_of_polynomials(
         thread_specific_factors: &[u32],
         thread_number: usize,
-        num_a: usize,
         n: &'a Integer,
         sieve_interval_length: u64,
         factorbase: &'a [u32],
@@ -79,7 +78,7 @@ impl<'a> SIQSPolynomialData<'a> {
             q: Integer::from(1),
             q_inverse_mod_n: Integer::from(1),
             list_of_qis: Vec::new(),
-            num_a,           // index of the next element of list_of_qis
+            num_a: 0,        // index of the next element of list_of_qis
             bis: Vec::new(), // for i = 1..s: B[i] = a/q[i] * gamma, gamma = sqrt(n mod p) * (a/q[i])^-1 (mod q[i])
             q_inv_mod_ps: Vec::with_capacity(factorbase.len()), //  for all p \nmid a in factorbase: (a^-1 mod p)
             bainv2ips: Vec::new(), // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all p \nmid a in factorbase
@@ -543,7 +542,6 @@ pub fn new_polynomial_generators<'a>(
         thread_polynomial_data.push(SIQSPolynomialData::initialize_new_set_of_polynomials(
             &thread_specific_factors,
             thread_number,
-            0,
             n,
             sieve_interval_length,
             factorbase,

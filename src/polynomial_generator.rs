@@ -15,25 +15,28 @@ pub struct Polynomial<'a> {
 }
 
 impl Polynomial<'_> {
-    // compute (u,y) with u^2 = v (n), writing into the caller-owned `u` and `y` so their
-    // allocations are reused across candidates instead of allocating a fresh pair per
-    // survivor (the common case is a non-relation, where the result is just discarded).
-    // y = ((a x + b) + b) * x + c = ax^2 + 2bx + c = Q(x) = ((qx + b)^2 - n)/q
-    // u = (qx + b) * q^-1 (n)
-    pub fn evaluate(&self, x: i32, n: &Integer, u: &mut Integer, y: &mut Integer) {
+    /// Writes Q(x) = ((a x + b) + b) x + c into `y`, reusing its allocation across
+    /// candidates.
+    pub fn evaluate(&self, x: i32, y: &mut Integer) {
         y.assign(self.a * x + &self.b);
-        // u = qx + b
-        u.assign(&*y);
         *y += &self.b;
         *y *= x;
-        *y += &self.c; // y = ux + c = qx^2 + 2bx + c = qx^2 + 2bx + (b^2-n)/q^2
-        // qy = (qx)^2 + 2b(qx) + (b^2-n)/q = (qx+b)^2 - b^2 + qc = u^2 - (b^2 + qc)
-        debug_assert_eq!(y.clone() * self.a, u.clone().square() - n);
-        // u = (qx+b)/q = x + b/q (mod n)
-        *u *= self.q_inverse;
-        *u %= n;
-        // (u/q)^2 = x^2 + 2bx/q + (b^2/q^2) =!= y = qx^2 + 2bx + c (mod n)
-        debug_assert!((u.clone().square() - y.clone()).is_divisible(n));
+        *y += &self.c;
+    }
+
+    /// The square root u = (a x + b) q^-1 of Q(x) modulo n, where b^2 - a c = n:
+    /// a = q^2 and a Q(x) = (a x + b)^2 - n. Only needed for the candidates that
+    /// give a relation.
+    pub fn sqrt_mod(&self, x: i32, n: &Integer) -> Integer {
+        let mut u = Integer::from(self.a * x + &self.b);
+        u *= self.q_inverse;
+        u %= n;
+        debug_assert!({
+            let mut y = Integer::new();
+            self.evaluate(x, &mut y);
+            (u.clone().square() - y).is_divisible(n)
+        });
+        u
     }
 }
 
@@ -108,12 +111,13 @@ mod tests {
             &factorbase,
         );
         let (polynomial, _) = generators[0].next_polynomial();
-        let (mut u, mut y) = (Integer::new(), Integer::new());
+        let mut y = Integer::new();
         for x in [-65536, -1000, -1, 0, 1, 777, 65535] {
-            polynomial.evaluate(x, &n, &mut u, &mut y);
+            polynomial.evaluate(x, &mut y);
             let ax_b = polynomial.a.clone() * x + &polynomial.b;
             assert_eq!(polynomial.a.clone() * &y, ax_b.square() - &n, "x = {x}");
-            assert!((u.clone().square() - &y).is_divisible(&n), "x = {x}");
+            let u = polynomial.sqrt_mod(x, &n);
+            assert!((u.square() - &y).is_divisible(&n), "x = {x}");
         }
     }
 }

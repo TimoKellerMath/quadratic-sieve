@@ -23,80 +23,76 @@ fn x_mod_p(x_abs: u32, x_neg: bool, p: u32, recip: u64) -> u32 {
     if x_neg && r != 0 { p - r } else { r }
 }
 
-// try to factor y = Q(x) over factorbase, using resieve: only divide by p if x ≡ root (mod p).
-// On success returns the indices of the factor-base primes with odd exponent, in
-// increasing order, and the large primes left: none for a full relation, one or (only
-// when use_dlp is set) two for a partial one.
-pub fn factor_over_factorbase(
-    x: i32,
-    y: &Integer,
-    factorbase: &[u32],
-    roots: &Roots,
-    reciprocals: &[u64],
+/// Trial division of the sieve's candidates over the factor base, with the bounds
+/// for large primes. It reuses its scratch across candidates, so every sieving
+/// thread has its own.
+pub struct TrialDivision<'a> {
+    factorbase: &'a [u32],
+    reciprocals: &'a [u64],
     k: u32,
     large_prime_multiplier: u32,
     use_dlp: bool,
-    scratch: &mut Integer,
-    factors: &mut Vec<u32>,
-) -> Option<(Vec<u32>, LargePrimes)> {
-    if y.is_zero() {
-        return None;
-    }
-    // Reuse the caller-owned scratch integer instead of cloning y on every
-    // candidate; assign reuses scratch's existing allocation.
-    let y_ = scratch;
-    y_.assign(y);
-    // Collect the factors in the caller-owned scratch, reused across candidates;
-    // only the rare successful relation is cloned out at the return.
-    factors.clear();
-    // -1 in factorbase
-    if y_.is_negative() {
-        factors.push(0);
-        y_.abs_mut();
-    }
-    // 2 in factorbase: divide out 2^exponent in place (y_ != 0 checked above)
-    let exponent = y_.find_one(0).unwrap();
-    *y_ >>= exponent;
-    if exponent % 2 == 1 {
-        factors.push(1);
-    }
+    // the cofactor of the candidate
+    cofactor: Integer,
+    // the factors found so far
+    factors: Vec<u32>,
+}
 
-    // indices 2..NUM_SKIP_PRIMES: sieve skips these, so trial-divide directly
-    for (i, &p) in factorbase.iter().enumerate().take(NUM_SKIP_PRIMES).skip(2) {
-        let mut exp = 0u32;
-        while y_.is_divisible_u(p) {
-            y_.div_exact_u_mut(p);
-            exp += 1;
-        }
-        if exp & 1 == 1 {
-            factors.push(i as u32);
-        }
-        if *y_ == 1 {
-            return Some((factors.clone(), LargePrimes::NONE));
+impl<'a> TrialDivision<'a> {
+    /// Trial division over `factorbase` with its Barrett `reciprocals`, for the
+    /// multiplier `k`; `use_dlp` admits two large primes.
+    pub fn new(
+        factorbase: &'a [u32],
+        reciprocals: &'a [u64],
+        k: u32,
+        large_prime_multiplier: u32,
+        use_dlp: bool,
+    ) -> TrialDivision<'a> {
+        TrialDivision {
+            factorbase,
+            reciprocals,
+            k,
+            large_prime_multiplier,
+            use_dlp,
+            cofactor: Integer::new(),
+            factors: Vec::new(),
         }
     }
 
-    // x is constant across the resieve; reduce it mod each p via the Barrett
-    // reciprocals instead of a hardware divide per prime.
-    let x_abs = x.unsigned_abs();
-    let x_neg = x < 0;
-    // indices NUM_SKIP_PRIMES..: sieved primes. p | Q(x) iff x ≡ root1 or root2 (mod p),
-    // so skip the big-int divisibility test for primes that don't hit x.
-    // Switch to u64 arithmetic once the cofactor fits in 63 bits. Its size only
-    // changes when a prime divides it, so check it only then: significant_bits is
-    // a GMP call, too slow to make for every prime.
-    let mut i = NUM_SKIP_PRIMES;
-    let mut fits_u64 = y_.significant_bits() <= 63;
-    while !fits_u64 && i < factorbase.len() {
-        let p = factorbase[i];
-        let divides = match roots.get(i) {
-            Some((r1, r2)) => {
-                let xmp = x_mod_p(x_abs, x_neg, p, reciprocals[i]);
-                xmp == r1 || xmp == r2
-            }
-            None => y_.is_divisible_u(p), // p | a: resieve info unavailable
-        };
-        if divides {
+    // try to factor y = Q(x) over factorbase, using resieve: only divide by p if x ≡ root (mod p).
+    // On success returns the indices of the factor-base primes with odd exponent, in
+    // increasing order, and the large primes left: none for a full relation, one or (only
+    // when use_dlp is set) two for a partial one.
+    pub fn factor(
+        &mut self,
+        x: i32,
+        y: &Integer,
+        roots: &Roots,
+    ) -> Option<(Vec<u32>, LargePrimes)> {
+        let (factorbase, reciprocals) = (self.factorbase, self.reciprocals);
+        if y.is_zero() {
+            return None;
+        }
+        // assign reuses the scratch's allocation instead of cloning y
+        let y_ = &mut self.cofactor;
+        y_.assign(y);
+        // only the rare successful relation is cloned out at the return
+        let factors = &mut self.factors;
+        factors.clear();
+        // -1 in factorbase
+        if y_.is_negative() {
+            factors.push(0);
+            y_.abs_mut();
+        }
+        // 2 in factorbase: divide out 2^exponent in place (y_ != 0 checked above)
+        let exponent = y_.find_one(0).unwrap();
+        *y_ >>= exponent;
+        if exponent % 2 == 1 {
+            factors.push(1);
+        }
+
+        // indices 2..NUM_SKIP_PRIMES: sieve skips these, so trial-divide directly
+        for (i, &p) in factorbase.iter().enumerate().take(NUM_SKIP_PRIMES).skip(2) {
             let mut exp = 0u32;
             while y_.is_divisible_u(p) {
                 y_.div_exact_u_mut(p);
@@ -108,92 +104,127 @@ pub fn factor_over_factorbase(
             if *y_ == 1 {
                 return Some((factors.clone(), LargePrimes::NONE));
             }
-            fits_u64 = y_.significant_bits() <= 63;
         }
-        i += 1;
-    }
 
-    // u64 fast path with sqrt early termination.
-    // If the cofactor still exceeds 64 bits after trial-dividing the whole factor
-    // base, its remaining prime factors are all larger than the largest factor-base
-    // prime; it cannot be a (single) large prime below largest_prime * lpm (which
-    // is far below 2^64), so this candidate yields no usable relation. This is the
-    // common case for larger N, where Q(x) is big enough that non-smooth cofactors
-    // stay above 64 bits.
-    let mut y_u64 = y_.to_u64()?;
-    while i < factorbase.len() {
-        let p = factorbase[i] as u64;
-        if p * p > y_u64 {
-            break;
+        // x is constant across the resieve; reduce it mod each p via the Barrett
+        // reciprocals instead of a hardware divide per prime.
+        let x_abs = x.unsigned_abs();
+        let x_neg = x < 0;
+        // indices NUM_SKIP_PRIMES..: sieved primes. p | Q(x) iff x ≡ root1 or root2 (mod p),
+        // so skip the big-int divisibility test for primes that don't hit x.
+        // Switch to u64 arithmetic once the cofactor fits in 63 bits. Its size only
+        // changes when a prime divides it, so check it only then: significant_bits is
+        // a GMP call, too slow to make for every prime.
+        let mut i = NUM_SKIP_PRIMES;
+        let mut fits_u64 = y_.significant_bits() <= 63;
+        while !fits_u64 && i < factorbase.len() {
+            let p = factorbase[i];
+            let divides = match roots.get(i) {
+                Some((r1, r2)) => {
+                    let xmp = x_mod_p(x_abs, x_neg, p, reciprocals[i]);
+                    xmp == r1 || xmp == r2
+                }
+                None => y_.is_divisible_u(p), // p | a: resieve info unavailable
+            };
+            if divides {
+                let mut exp = 0u32;
+                while y_.is_divisible_u(p) {
+                    y_.div_exact_u_mut(p);
+                    exp += 1;
+                }
+                if exp & 1 == 1 {
+                    factors.push(i as u32);
+                }
+                if *y_ == 1 {
+                    return Some((factors.clone(), LargePrimes::NONE));
+                }
+                fits_u64 = y_.significant_bits() <= 63;
+            }
+            i += 1;
         }
-        let divides = match roots.get(i) {
-            Some((r1, r2)) => {
-                let xmp = x_mod_p(x_abs, x_neg, factorbase[i], reciprocals[i]) as u64;
-                xmp == r1 as u64 || xmp == r2 as u64
-            }
-            None => y_u64 % p == 0,
-        };
-        if divides {
-            let mut exp = 0u32;
-            while y_u64 % p == 0 {
-                y_u64 /= p;
-                exp += 1;
-            }
-            if exp & 1 == 1 {
-                factors.push(i as u32);
-            }
-            if y_u64 == 1 {
-                return Some((factors.clone(), LargePrimes::NONE));
-            }
-        }
-        i += 1;
-    }
 
-    // remainder y_u64 is 1 or prime
-    if y_u64 == 1 {
-        return Some((factors.clone(), LargePrimes::NONE));
-    }
-    // locate prime in factorbase[i..] via binary search
-    let largest_prime = *factorbase.last().unwrap() as u64;
-    if y_u64 <= largest_prime
-        && let Ok(offset) = factorbase[i..].binary_search(&(y_u64 as u32))
-    {
-        factors.push((i + offset) as u32);
-        return Some((factors.clone(), LargePrimes::NONE));
-    }
-    debug_assert!(Integer::from(y_u64).gcd_u(k) == 1);
-    // large prime bound: largest_prime * lpm stays below 2^32, so a single large
-    // prime always fits in u32.
-    let lp_bound = largest_prime * large_prime_multiplier as u64;
-    // single large prime variation: y_u64 has no factor <= largest_prime, and
-    // lp_bound < largest_prime^2, so a value below lp_bound is necessarily prime.
-    if y_u64 < lp_bound {
-        return Some((factors.clone(), LargePrimes::one(y_u64 as u32)));
-    }
-    // double large prime variation: y_u64 is a product of large primes (it survived
-    // trial division by the whole factor base). Accept it only if it splits into two
-    // primes, each below lp_bound, i.e. y_u64 is a semiprime <= lp_bound^2.
-    //
-    // The common case here is a single prime cofactor > lp_bound (useless): the
-    // base-2 test rejects it with one modular exponentiation, where the full
-    // primality test would run all its witnesses on a prime (the worst case). A
-    // `false` result certifies compositeness, so the Pollard-rho split below is
-    // guaranteed to terminate. p and q are <= lp_bound < 2^32, so the cheaper
-    // 3-witness is_prime_u32 suffices to confirm them prime.
-    if use_dlp && y_u64 <= lp_bound * lp_bound && !is_probable_prime_base2(y_u64) {
-        let p = pollard_rho_u64(y_u64);
-        let q = y_u64 / p;
-        if p <= lp_bound && q <= lp_bound && is_prime_u32(p) && is_prime_u32(q) {
-            if p == q {
-                // cofactor is a prime square: already a perfect square, so the large
-                // prime contributes nothing to the parity vector. This is a full
-                // relation (find_factor recovers p via the v product).
-                return Some((factors.clone(), LargePrimes::NONE));
+        // u64 fast path with sqrt early termination.
+        // If the cofactor still exceeds 64 bits after trial-dividing the whole factor
+        // base, its remaining prime factors are all larger than the largest factor-base
+        // prime; it cannot be a (single) large prime below largest_prime * lpm (which
+        // is far below 2^64), so this candidate yields no usable relation. This is the
+        // common case for larger N, where Q(x) is big enough that non-smooth cofactors
+        // stay above 64 bits.
+        let mut y_u64 = y_.to_u64()?;
+        while i < factorbase.len() {
+            let p = factorbase[i] as u64;
+            if p * p > y_u64 {
+                break;
             }
-            return Some((factors.clone(), LargePrimes::two(p as u32, q as u32)));
+            let divides = match roots.get(i) {
+                Some((r1, r2)) => {
+                    let xmp = x_mod_p(x_abs, x_neg, factorbase[i], reciprocals[i]) as u64;
+                    xmp == r1 as u64 || xmp == r2 as u64
+                }
+                None => y_u64 % p == 0,
+            };
+            if divides {
+                let mut exp = 0u32;
+                while y_u64 % p == 0 {
+                    y_u64 /= p;
+                    exp += 1;
+                }
+                if exp & 1 == 1 {
+                    factors.push(i as u32);
+                }
+                if y_u64 == 1 {
+                    return Some((factors.clone(), LargePrimes::NONE));
+                }
+            }
+            i += 1;
         }
+
+        // remainder y_u64 is 1 or prime
+        if y_u64 == 1 {
+            return Some((factors.clone(), LargePrimes::NONE));
+        }
+        // locate prime in factorbase[i..] via binary search
+        let largest_prime = *factorbase.last().unwrap() as u64;
+        if y_u64 <= largest_prime
+            && let Ok(offset) = factorbase[i..].binary_search(&(y_u64 as u32))
+        {
+            factors.push((i + offset) as u32);
+            return Some((factors.clone(), LargePrimes::NONE));
+        }
+        debug_assert!(Integer::from(y_u64).gcd_u(self.k) == 1);
+        // large prime bound: largest_prime * lpm stays below 2^32, so a single large
+        // prime always fits in u32.
+        let lp_bound = largest_prime * self.large_prime_multiplier as u64;
+        // single large prime variation: y_u64 has no factor <= largest_prime, and
+        // lp_bound < largest_prime^2, so a value below lp_bound is necessarily prime.
+        if y_u64 < lp_bound {
+            return Some((factors.clone(), LargePrimes::one(y_u64 as u32)));
+        }
+        // double large prime variation: y_u64 is a product of large primes (it survived
+        // trial division by the whole factor base). Accept it only if it splits into two
+        // primes, each below lp_bound, i.e. y_u64 is a semiprime <= lp_bound^2.
+        //
+        // The common case here is a single prime cofactor > lp_bound (useless): the
+        // base-2 test rejects it with one modular exponentiation, where the full
+        // primality test would run all its witnesses on a prime (the worst case). A
+        // `false` result certifies compositeness, so the Pollard-rho split below is
+        // guaranteed to terminate. p and q are <= lp_bound < 2^32, so the cheaper
+        // 3-witness is_prime_u32 suffices to confirm them prime.
+        if self.use_dlp && y_u64 <= lp_bound * lp_bound && !is_probable_prime_base2(y_u64) {
+            let p = pollard_rho_u64(y_u64);
+            let q = y_u64 / p;
+            if p <= lp_bound && q <= lp_bound && is_prime_u32(p) && is_prime_u32(q) {
+                if p == q {
+                    // cofactor is a prime square: already a perfect square, so the large
+                    // prime contributes nothing to the parity vector. This is a full
+                    // relation (find_factor recovers p via the v product).
+                    return Some((factors.clone(), LargePrimes::NONE));
+                }
+                return Some((factors.clone(), LargePrimes::two(p as u32, q as u32)));
+            }
+        }
+        None
     }
-    None
 }
 
 #[cfg(test)]
@@ -234,7 +265,7 @@ mod tests {
     }
 
     // The relation of y over the factor base by trial division with every prime,
-    // classified independently of factor_over_factorbase: full, one large prime
+    // classified independently of TrialDivision::factor: full, one large prime
     // below the bound, or two large primes below it (split by trial division).
     fn brute_force_relation(
         y: &Integer,
@@ -288,8 +319,8 @@ mod tests {
         })
     }
 
-    // At every position of the interval, factor_over_factorbase finds the same
-    // relation as brute force, and every kind of outcome occurs.
+    // At every position of the interval, trial division finds the same relation as
+    // brute force, and every kind of outcome occurs.
     #[test]
     fn trial_division_matches_brute_force() {
         let n = example_n();
@@ -306,25 +337,14 @@ mod tests {
         );
         let (polynomial, roots) = generators[0].next_polynomial();
         let large_prime_multiplier = 40;
-        let (mut u, mut y) = (Integer::new(), Integer::new());
-        let mut scratch = Integer::new();
-        let mut factors_scratch = Vec::new();
+        let mut trial_division =
+            TrialDivision::new(&factorbase, &reciprocals, 1, large_prime_multiplier, true);
+        let mut y = Integer::new();
         // none, full, one large prime, two large primes
         let mut outcomes = [0usize; 4];
         for x in -65536..65536 {
-            polynomial.evaluate(x, &n, &mut u, &mut y);
-            let got = factor_over_factorbase(
-                x,
-                &y,
-                &factorbase,
-                roots,
-                &reciprocals,
-                1,
-                large_prime_multiplier,
-                true,
-                &mut scratch,
-                &mut factors_scratch,
-            );
+            polynomial.evaluate(x, &mut y);
+            let got = trial_division.factor(x, &y, roots);
             let want = brute_force_relation(&y, &factorbase, large_prime_multiplier);
             assert_eq!(got, want, "x = {x}");
             outcomes[want.map_or(0, |(_, large_primes)| 1 + large_primes.count())] += 1;

@@ -25,7 +25,18 @@ jobs:
       - run: cargo fmt --check
 
   clippy:
+    name: clippy (${{ matrix.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: scalar
+            rustflags: -D warnings
+          - name: avx2
+            rustflags: -D warnings -C target-feature=+avx2
+    env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
     steps:
       - uses: actions/checkout@v7
       - run: sudo apt-get update && sudo apt-get install -y libgmp-dev
@@ -33,7 +44,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # not blocking yet: warnings are reported but don't fail the job
+        with:
+          key: ${{ matrix.name }}
       - run: cargo clippy --locked --all-targets
 
   test:

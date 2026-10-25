@@ -79,8 +79,7 @@ fn main() {
     // Prepare the reusable buffers
     let total_len = 2 * sieve_interval_length;
     let mut buffer = vec![0u8; total_len];
-    let mut next_pos: Vec<usize> = Vec::with_capacity(2 * factorbase.len());
-    let mut buckets = block_sieve::Buckets::default();
+    let mut scratch = block_sieve::SieveScratch::default();
 
     // block sizes to test
     let block_sizes = vec![1024usize, 4096, 16384, 32768, 65536, 2 * 65536, 4 * 65536];
@@ -99,8 +98,7 @@ fn main() {
             &roots,
             &logs,
             &mut buffer,
-            &mut next_pos,
-            &mut buckets,
+            &mut scratch,
             block_size,
         );
 
@@ -113,8 +111,7 @@ fn main() {
                 &roots,
                 &logs,
                 &mut buffer,
-                &mut next_pos,
-                &mut buckets,
+                &mut scratch,
                 block_size,
             );
         }
