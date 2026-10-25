@@ -565,7 +565,8 @@ pub fn sieve_over_factorbase(
 ///   which the largest tabulated sieve size satisfies). Halving the entry size keeps
 ///   the fill's write traffic — the bulk of the sieve setup — cache-resident longer.
 ///   Allocations are reused; contents are reset each call.
-/// - `block_size`: block size in elements (choose e.g. 8k .. 64k)
+/// - `block_size`: block size in elements, a power of two (positions map to blocks by
+///   a shift); one larger than the window gives a single block
 ///
 /// Returns sum of small logs (same as other variants).
 #[allow(clippy::too_many_arguments)]
@@ -589,20 +590,19 @@ pub fn sieve_over_factorbase_blocked(
 
     debug_assert!(NUM_SKIP_PRIMES >= 1);
 
-    // block size 0 or oversized => a single block spanning the whole window.
-    let bsize = if block_size == 0 || block_size > total_len {
-        total_len.max(1)
-    } else {
-        block_size
-    };
-    let num_blocks = total_len.div_ceil(bsize);
+    assert!(
+        block_size.is_power_of_two(),
+        "block size {block_size} is not a power of two"
+    );
+    let block_shift = block_size.trailing_zeros();
+    let num_blocks = total_len.div_ceil(block_size);
 
     // factorbase is sorted ascending, so primes <= block_size form a prefix. Skip the
     // first NUM_SKIP_PRIMES entries (-1 sentinel, 2, and the directly trial‑divided
     // small primes), the same as the per-prime loops below.
     let ns = NUM_SKIP_PRIMES.min(factorbase.len());
     let split = factorbase
-        .partition_point(|&p| (p as usize) <= bsize)
+        .partition_point(|&p| (p as usize) <= block_size)
         .max(ns);
 
     let profile = sieve_profile_enabled();
@@ -627,13 +627,13 @@ pub fn sieve_over_factorbase_blocked(
         let p_us = p as usize;
         let mut pos = (root1 as usize + sieve_interval_length) % p_us;
         while pos < total_len {
-            buckets[pos / bsize].push(pos as u32 | log_packed);
+            buckets[pos >> block_shift].push(pos as u32 | log_packed);
             pos += p_us;
         }
         if root2 != root1 {
             let mut pos = (root2 as usize + sieve_interval_length) % p_us;
             while pos < total_len {
-                buckets[pos / bsize].push(pos as u32 | log_packed);
+                buckets[pos >> block_shift].push(pos as u32 | log_packed);
                 pos += p_us;
             }
         }
@@ -666,7 +666,7 @@ pub fn sieve_over_factorbase_blocked(
     let mut block_start = 0usize;
     let mut block_idx = 0usize;
     while block_start < total_len {
-        let block_end = (block_start + bsize).min(total_len);
+        let block_end = (block_start + block_size).min(total_len);
         let mut idx = 0usize;
         for (&p, &log) in izip!(small_primes, small_logs) {
             let p_us = p as usize;
@@ -814,10 +814,10 @@ mod tests {
         let total_len = 2 * sieve_interval_length;
         let mut next_pos = Vec::new();
         let mut buckets: Vec<Vec<u32>> = Vec::new();
-        // block sizes that divide total_len, that don't, that are tiny (many blocks),
-        // and that exceed total_len (single block) — every prime above the size goes
-        // to the buckets.
-        for &block_size in &[7usize, 16, 64, 250, 333, 1000, 4096] {
+        // block sizes that are tiny (many blocks), that don't divide total_len, and
+        // that exceed total_len (single block) — every prime above the size goes to
+        // the buckets.
+        for &block_size in &[8usize, 16, 64, 256, 512, 1024, 4096] {
             let mut buf = vec![0u8; total_len];
             sieve_over_factorbase_blocked(
                 sieve_interval_length,

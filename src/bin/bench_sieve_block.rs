@@ -84,16 +84,7 @@ fn main() {
     let reciprocals = siqs::factorbase::compute_reciprocals(&factorbase);
 
     // block sizes to test
-    let block_sizes = vec![
-        1024usize,
-        4096,
-        16384,
-        32768,
-        65536,
-        2 * 65536,
-        3 * 65536,
-        4 * 65536,
-    ];
+    let block_sizes = vec![1024usize, 4096, 16384, 32768, 65536, 2 * 65536, 4 * 65536];
 
     println!(
         "Benchmark: sieve interval total_len = {}, primes = {}",
