@@ -120,3 +120,66 @@ pub fn compute_sieve_parameters(bits: usize) -> (usize, usize, u32) {
             + 0.5f64) as u32,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multipliers_of_the_examples() {
+        // the 202-, 251- and 301-bit examples from main.rs
+        let n202: Integer = "6427752177035961102167848371107669985402627402189138248671463"
+            .parse()
+            .unwrap();
+        let n251: Integer =
+            "3618502788666131106986593281521497123009340068573423410141280881914517913789"
+                .parse()
+                .unwrap();
+        let n301 =
+            (Integer::from(1) << 150u32).next_prime() * (Integer::from(1) << 151u32).next_prime();
+        assert_eq!(compute_multiplier(&n202).unwrap(), 23);
+        assert_eq!(compute_multiplier(&n251).unwrap(), 1);
+        assert_eq!(compute_multiplier(&n301).unwrap(), 3);
+    }
+
+    #[test]
+    fn multiplier_rejects_small_factors() {
+        let mersenne = (Integer::from(1) << 61u32) - 1u32;
+        for p in [2u32, 7, 997] {
+            let n = mersenne.clone() * p;
+            assert!(
+                matches!(compute_multiplier(&n), Err(NumberTheoryError::NotCoprime(_, q)) if q == p),
+                "factor {p} not reported"
+            );
+        }
+    }
+
+    #[test]
+    fn sieve_parameters_at_table_entries() {
+        assert_eq!(compute_sieve_parameters(200), (3000, 3 * 65536, 50));
+        assert_eq!(compute_sieve_parameters(212), (5400, 3 * 65536, 50));
+        assert_eq!(compute_sieve_parameters(298), (60000, 9 * 65536, 80));
+    }
+
+    #[test]
+    fn sieve_parameters_are_interpolated() {
+        // halfway between the entries for 200 and 212 bits
+        assert_eq!(compute_sieve_parameters(206), (4200, 3 * 65536, 50));
+        // between 283 (55000, 3 * 65536, 80) and 298 (60000, 9 * 65536, 80)
+        assert_eq!(compute_sieve_parameters(290), (57333, 380109, 80));
+        // the factor base never shrinks as n grows
+        for bits in 64..400 {
+            assert!(compute_sieve_parameters(bits).0 <= compute_sieve_parameters(bits + 1).0);
+        }
+    }
+
+    #[test]
+    fn sieve_parameters_are_clamped_to_the_table() {
+        assert_eq!(compute_sieve_parameters(10), (100, 65536, 40));
+        assert_eq!(compute_sieve_parameters(64), (100, 65536, 40));
+        // above the table, all three come from its last entry; the large-prime
+        // multiplier used to come from the first one (c089ffc)
+        assert_eq!(compute_sieve_parameters(395), (400000, 21 * 65536, 150));
+        assert_eq!(compute_sieve_parameters(500), (400000, 21 * 65536, 150));
+    }
+}

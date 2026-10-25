@@ -36,13 +36,17 @@ type RelationMsg = (Integer, Integer, FixedBitSet, u32, u32, usize);
 /// `SIQS_LP_SLACK` env var (e.g. `SIQS_LP_SLACK=1.5`) for parameter sweeps.
 fn lp_slack_multiplier(use_dlp: bool, n_bits: u32) -> f64 {
     static OVERRIDE: OnceLock<Option<f64>> = OnceLock::new();
-    if let Some(m) = OVERRIDE.get_or_init(|| {
-        std::env::var("SIQS_LP_SLACK")
-            .ok()
-            .and_then(|s| s.parse().ok())
-    }) {
-        return *m;
-    }
+    OVERRIDE
+        .get_or_init(|| {
+            std::env::var("SIQS_LP_SLACK")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or_else(|| default_lp_slack_multiplier(use_dlp, n_bits))
+}
+
+/// The measured defaults of [`lp_slack_multiplier`], without the env override.
+fn default_lp_slack_multiplier(use_dlp: bool, n_bits: u32) -> f64 {
     if !use_dlp {
         return 0.75;
     }
@@ -688,9 +692,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_compute_sieve_parameters() {
-        for bits in 63..=213 {
-            println!("{bits}: {:?}", compute_sieve_parameters(bits));
+    fn lp_slack_defaults() {
+        let close = |x: f64, y: f64| (x - y).abs() < 1e-12;
+        // without the double large prime variation: constant
+        for n_bits in [64, 202, 250, 301] {
+            assert!(close(default_lp_slack_multiplier(false, n_bits), 0.75));
         }
+        // with it: linear between (251, 0.72) and (300, 1.15), clamped outside
+        assert!(close(default_lp_slack_multiplier(true, 251), 0.72));
+        assert!(close(default_lp_slack_multiplier(true, 300), 1.15));
+        assert!(close(
+            default_lp_slack_multiplier(true, 270),
+            0.72 + 0.43 * 19.0 / 49.0
+        ));
+        assert!(close(default_lp_slack_multiplier(true, 200), 0.72));
+        assert!(close(default_lp_slack_multiplier(true, 400), 1.15));
     }
 }
