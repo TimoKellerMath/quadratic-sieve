@@ -216,21 +216,41 @@ impl<'a> SIQSPolynomialData<'a> {
         debug_println!("{} q's", self.list_of_qis.len());
     }
 
-    fn root_of_linear_polynomial_mod_p(b: &Integer, c: &Integer, p: u32) -> Option<u32> {
+    // The root of the sieving polynomial modulo a prime p | a, where it is linear:
+    // a x^2 + 2 b x + c ≡ 2 b x + c (mod p). 2b is invertible, since p | b would
+    // imply p | kn, which the q-primes exclude. None for p <= 2.
+    fn linear_root_mod_p(b: &Integer, c: &Integer, p: u32) -> Option<u32> {
         if p <= 2 {
             return None;
         }
-        let twice_b: Integer = (b << 1u32).complete();
-        if let Ok(twice_b_inverse) = twice_b.invert(&Integer::from(p)) {
-            // TODO: can this fail?
-            let root1 = twice_b_inverse * c;
-            let root = p - root1.mod_u(p);
-            //println!("root = {root}, b = {b}, c = {c}, p = {p}");
-            debug_assert!((Integer::from(2) * b * root + c).is_divisible_u(p));
-            Some(root)
-        } else {
-            // if poly = c (p), then either there is no zero or the polynomial is 0
-            None
+        let twice_b = (2 * b.mod_u(p) as u64 % p as u64) as u32;
+        let inverse = modular_inverse_u32(twice_b, p).expect("2b is invertible mod p for p | a");
+        // x = -c / (2b) mod p
+        let minus_c = (p - c.mod_u(p)) % p;
+        let root = (minus_c as u64 * inverse as u64 % p as u64) as u32;
+        debug_assert!((Integer::from(2) * b * root + c).is_divisible_u(p));
+        Some(root)
+    }
+
+    // The roots of the first polynomial of the current a modulo every factor-base
+    // prime, from the square roots `n_roots` of n: r = a^-1 (±sqrt(n) - b) (mod p).
+    fn compute_roots(&mut self, factorbase: &[u32], n_roots: &[u32]) {
+        self.roots.clear();
+        assert!(factorbase.len() == self.q_inv_mod_ps.len() && factorbase.len() == n_roots.len());
+        for ((&p, q_inv), &root) in factorbase.iter().zip(&self.q_inv_mod_ps).zip(n_roots) {
+            let roots = match q_inv {
+                Some(ainvp) => {
+                    let (p64, ainvp) = (p as u64, ainvp.get() as u64);
+                    let b = self.b.mod_u(p) as u64;
+                    let root = root as u64;
+                    Some((
+                        ((root + p64 - b) % p64 * ainvp % p64) as u32,
+                        ((2 * p64 - root - b) % p64 * ainvp % p64) as u32,
+                    ))
+                }
+                None => Self::linear_root_mod_p(&self.b, &self.c, p).map(|root| (root, root)),
+            };
+            self.roots.push(roots);
         }
     }
 
@@ -317,31 +337,7 @@ impl<'a> SIQSPolynomialData<'a> {
         }
         debug_assert!((self.b.clone().square() - n.clone()).is_divisible(&self.q.clone().square()));
 
-        // compute roots of polynomial modulo p in factorbase
-        self.roots.clear();
-        assert!(factorbase.len() == self.q_inv_mod_ps.len() && factorbase.len() == roots.len());
-        for ((&p, q_inv), root) in factorbase.iter().zip(&self.q_inv_mod_ps).zip(roots) {
-            // TODO: factor out into "roots of polynomial"; update root updates!
-            if let Some(ainvp) = q_inv {
-                let roots = (
-                    (ainvp.get() * (root - &self.b).complete()).mod_u(p),
-                    (ainvp.get() * (-(*root as i32) - &self.b).complete()).mod_u(p),
-                );
-                self.roots.push(Some(roots));
-                //debug_assert!(((self.q.clone() * roots.0 + self.b.clone()).square() - n.clone()).is_divisible_u(p));
-                //debug_assert!(((self.q.clone() * roots.1 + self.b.clone()).square() - n.clone()).is_divisible_u(p));
-            } else {
-                // q = 0 (mod p) => we have a linear polynomial
-                if let Some(root) = Self::root_of_linear_polynomial_mod_p(&self.b, &self.c, p) {
-                    self.roots.push(Some((root, root)));
-                }
-                //else if c.is_divisible_u(p)
-                else {
-                    // if poly = c (p), then either there is no zero or the polynomial is 0
-                    self.roots.push(None);
-                }
-            }
-        }
+        self.compute_roots(factorbase, roots);
     }
 
     // returns the next polynomial and its roots modulo the primes in the factorbase
@@ -421,14 +417,11 @@ impl<'a> SIQSPolynomialData<'a> {
             .zip(&self.bainv2ips[nu])
         {
             if q_inv.is_none() {
-                // double root, i.e., we have a linear polynomial (really? it only means discriminant is 0)
-                if let Some(root) = Self::root_of_linear_polynomial_mod_p(&b, &c, p) {
-                    // TODO: prime divisors of b can change (become less)
-                    (*r1, *r2) = (root, root);
-                    //println!("p = {p}: root = {root}");
-                } else {
-                    (*r1, *r2) = (Roots::NONE, Roots::NONE);
-                }
+                // p | a (or p <= 2): Q is linear mod p, with a single root
+                (*r1, *r2) = match Self::linear_root_mod_p(&b, &c, p) {
+                    Some(root) => (root, root),
+                    None => (Roots::NONE, Roots::NONE),
+                };
             } else if *r1 != Roots::NONE {
                 let new_roots =
                     Self::new_roots_with_sign((*r1, *r2), bainv, p, rounded_exponent % 2 != 0);
