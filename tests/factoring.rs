@@ -1,12 +1,12 @@
 // Integration tests for the public sieve entry point used by main.rs:
-// siqs::sieve::quadratic_sieve_multithreaded.
+// siqs::sieve::quadratic_sieve_lanczos.
 //
 // Each test builds a known semiprime, factors it, and checks the returned
 // factor is non-trivial and actually divides n. Run heavy cases with
 // `cargo test --release -- --ignored`.
 
 use rug::Integer;
-use siqs::sieve::{quadratic_sieve_lanczos, quadratic_sieve_multithreaded};
+use siqs::sieve::quadratic_sieve_lanczos;
 
 /// Deterministic semiprime n = p*q with p ~ 2^bits_p, q ~ 2^bits_q.
 fn semiprime(bits_p: u32, bits_q: u32) -> (Integer, Integer, Integer) {
@@ -32,21 +32,10 @@ fn assert_valid_factor(n: &Integer, result: Option<Integer>) {
     );
 }
 
-/// Factor n with the incremental-Gaussian solver and assert a valid divisor.
+/// Factor n and assert a valid divisor.
 fn check_factor(n: &Integer, num_threads: usize) {
-    let result = quadratic_sieve_multithreaded(n, num_threads)
+    let result = quadratic_sieve_lanczos(n, num_threads)
         .unwrap_or_else(|e| panic!("sieve errored on {}-bit n: {e}", n.significant_bits()));
-    assert_valid_factor(n, result);
-}
-
-/// Factor n with the Block Lanczos solver and assert a valid divisor.
-fn check_factor_lanczos(n: &Integer, num_threads: usize) {
-    let result = quadratic_sieve_lanczos(n, num_threads).unwrap_or_else(|e| {
-        panic!(
-            "lanczos sieve errored on {}-bit n: {e}",
-            n.significant_bits()
-        )
-    });
     assert_valid_factor(n, result);
 }
 
@@ -87,45 +76,16 @@ fn factors_150_bit() {
     check_factor(&n, 4);
 }
 
-// --- Block Lanczos solver: same numbers, batch linear algebra ---
-
+// Regression test: the sieving tasks used to run on rayon's pool, where in a pool
+// with one thread a sieving task, which never ends, starved the collecting task.
 #[test]
-fn lanczos_factors_64_bit() {
-    let (n, _, _) = semiprime(32, 32);
-    check_factor_lanczos(&n, 1);
-}
-
-#[test]
-fn lanczos_factors_96_bit() {
-    let (n, _, _) = semiprime(48, 48);
-    check_factor_lanczos(&n, 2);
-}
-
-#[test]
-fn lanczos_factors_120_bit() {
-    let (n, _, _) = semiprime(60, 60);
-    check_factor_lanczos(&n, 4);
-}
-
-#[test]
-fn lanczos_factors_150_bit() {
-    let (n, _, _) = semiprime(75, 75);
-    check_factor_lanczos(&n, 4);
-}
-
-#[test]
-fn lanczos_factors_unbalanced_100_bit() {
-    let (n, _, _) = semiprime(30, 70);
-    check_factor_lanczos(&n, 2);
-}
-
-#[test]
-#[ignore = "slow: run with --ignored"]
-fn lanczos_factors_202_bit() {
-    let n = "6427752177035961102167848371107669985402627402189138248671463"
-        .parse::<Integer>()
+fn factors_inside_a_single_threaded_rayon_pool() {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
         .unwrap();
-    check_factor_lanczos(&n, 7);
+    let (n, _, _) = semiprime(40, 40);
+    pool.install(|| check_factor(&n, 2));
 }
 
 #[test]
@@ -175,9 +135,8 @@ fn random_semiprimes() -> Vec<Integer> {
 }
 
 #[test]
-fn factors_random_semiprimes_with_both_solvers() {
+fn factors_random_semiprimes() {
     for n in random_semiprimes() {
         check_factor(&n, 2);
-        check_factor_lanczos(&n, 2);
     }
 }

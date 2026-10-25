@@ -16,8 +16,8 @@ on multiple threads.
   arithmetic, partials combined by cycle finding).
 - **Linear algebra:** Block Lanczos over GF(2), parallelized, after removing
   singleton relations.
-- **Threads:** one sieving thread per polynomial generator and one thread
-  collecting relations.
+- **Threads:** one sieving thread per polynomial generator; the calling thread
+  collects the relations.
 
 ## Requirements
 
@@ -44,15 +44,8 @@ let num_threads = 7; // sieving threads
 let factor: Option<Integer> = quadratic_sieve_lanczos(&n, num_threads).unwrap();
 ```
 
-The library prints its progress to stdout. There are two solvers with the same
-signature:
-
-- `quadratic_sieve_lanczos` collects relations until it has 192 more than the
-  number of primes that appear, then runs Block Lanczos. Use it for larger
-  numbers.
-- `quadratic_sieve_multithreaded` runs Gaussian elimination after every
-  relation and stops at the first dependency. It is only practical for small
-  factor bases.
+The library prints its progress to stdout. It collects relations until it has
+192 more than the number of primes that appear, then runs Block Lanczos.
 
 `n` must not have prime factors below 1000 (an error is returned otherwise),
 and it is not checked for primality or perfect powers, so remove small factors
@@ -100,12 +93,11 @@ builds much faster.
 
 | File | Contents |
 |---|---|
-| `src/sieve.rs` | Driver: sieving threads, relation collection, both solvers |
+| `src/sieve.rs` | Driver: sieving threads and relation collection |
 | `src/siqs_generator.rs` | Self-initializing polynomial generation |
 | `src/block_sieve.rs` | The sieve, in blocks, with buckets for the large primes |
 | `src/trial_division.rs` | Trial division of the sieve's candidates |
 | `src/large_primes.rs` | Combining partial relations into full ones |
-| `src/gauss.rs` | Incremental Gaussian elimination |
 | `src/square_root.rs` | From a dependency to a factor |
 | `src/linalg.rs` | Block Lanczos and a dense GF(2) solver |
 | `src/number_theory.rs` | Modular square roots, Miller–Rabin, Pollard rho |

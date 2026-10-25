@@ -1,12 +1,11 @@
 //! Linear-algebra phase: collect relations as a sparse GF(2) matrix and solve for
 //! dependencies (subsets of relations whose product over the factor base is a
-//! square). This module is the batch counterpart to the incremental Gaussian
-//! elimination in [`crate::gauss::Relations`], and the staging ground for a
-//! future Block Lanczos solver.
+//! square) with Block Lanczos.
 //!
 //! [`dense_left_null_space`] is a straightforward dense GF(2) elimination. It is
-//! O(R · F · R / 64) and meant as a correctness *oracle* — a reference the eventual
-//! Block Lanczos implementation must agree with — not as the production solver.
+//! O(R · F · R / 64) and meant as a correctness *oracle* — a reference the Block
+//! Lanczos implementation must agree with — and as its last-resort fallback, not as
+//! the production solver.
 
 use fixedbitset::FixedBitSet;
 use rayon::prelude::*;
@@ -17,9 +16,9 @@ use rug::Integer;
 /// with the `(u, v)` pair needed to recover a factor from a dependency, where
 /// `u^2 ≡ v (mod n)`.
 ///
-/// This is the sparse replacement for the dense per-relation `FixedBitSet` rows used
-/// during sieving: a row of average weight `w` costs `w` `u32`s instead of `F/8`
-/// bytes, which is the difference between a few MB and ~1 GB at the largest sizes.
+/// A row of average weight `w` costs `w` `u32`s instead of the `F/8` bytes of a
+/// dense bit row, which is the difference between a few MB and ~1 GB at the largest
+/// sizes.
 pub struct SparseRelations {
     num_columns: usize,
     rows: Vec<Vec<u32>>,
@@ -88,12 +87,12 @@ fn xor_row_into(rows: &mut [FixedBitSet], dst: usize, src: usize) {
 /// exactly `rows.len() - rank`.
 ///
 /// Each working row carries a `num_columns`-bit column part and a `rows.len()`-bit
-/// tracking part recording which original rows have been combined into it (the same
-/// device as `Relations::indices`). Rows are reduced against registered pivots until
-/// they either acquire a fresh pivot column or vanish; a vanished column part means
-/// the tracking part is a dependency. Pivot rows, once registered, are never modified
-/// and their lowest set column is their pivot column, so each reduction strictly
-/// raises a row's lowest set column — guaranteeing termination.
+/// tracking part recording which original rows have been combined into it. Rows are
+/// reduced against registered pivots until they either acquire a fresh pivot column
+/// or vanish; a vanished column part means the tracking part is a dependency. Pivot
+/// rows, once registered, are never modified and their lowest set column is their
+/// pivot column, so each reduction strictly raises a row's lowest set column —
+/// guaranteeing termination.
 pub fn dense_left_null_space(rows: &[Vec<u32>], num_columns: usize) -> Vec<Vec<usize>> {
     let num_rows = rows.len();
     // column parts
@@ -727,8 +726,8 @@ impl SparseRelations {
     /// answer. After exhausting retries we fall back to the exact dense solver.
     ///
     /// The matrix–block products inside Block Lanczos run on a private rayon pool of
-    /// `num_threads` threads (so the solver's parallelism is independent of the global
-    /// pool the sieve uses). The GF(2) reductions are associative, so the result is
+    /// `num_threads` threads (so the solver's parallelism is independent of rayon's
+    /// global pool). The GF(2) reductions are associative, so the result is
     /// bit-identical to a single-threaded run with the same seed.
     pub fn dependencies_lanczos(&self, seed: u64, num_threads: usize) -> Vec<Vec<usize>> {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -1244,29 +1243,12 @@ mod tests {
             cols.dedup();
             sr.push_sparse(cols, (Integer::from(1), Integer::from(1)));
         }
-        eprintln!("--- from main thread ---");
         for threads in [1usize, 8] {
             let start = Instant::now();
             let deps = sr.dependencies_lanczos(0xC0FFEE, threads);
             let elapsed = start.elapsed();
             eprintln!("threads={threads}: {elapsed:.2?}, {} deps", deps.len());
             assert!(!deps.is_empty());
-        }
-        // mimic the real call site: dependencies_lanczos is invoked from *inside* a
-        // rayon::scope spawned task (the collector), not the main thread. If the
-        // nested pool doesn't engage there, this will be ~as slow as 1 thread.
-        eprintln!("--- from within rayon::scope spawn ---");
-        for threads in [1usize, 8] {
-            let mut elapsed = std::time::Duration::ZERO;
-            rayon::scope(|s| {
-                s.spawn(|_| {
-                    let start = Instant::now();
-                    let deps = sr.dependencies_lanczos(0xC0FFEE, threads);
-                    elapsed = start.elapsed();
-                    assert!(!deps.is_empty());
-                });
-            });
-            eprintln!("threads={threads} (in scope): {elapsed:.2?}");
         }
     }
 

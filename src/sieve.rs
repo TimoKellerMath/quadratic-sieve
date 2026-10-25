@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{OnceLock, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use rug::Integer;
@@ -11,7 +12,6 @@ use crate::block_sieve::{
 use crate::debug_print;
 use crate::factorbase::*;
 use crate::format_color::format_color;
-use crate::gauss::Relations;
 use crate::large_primes::PartialStore;
 use crate::linalg::*;
 use crate::multiplier::*;
@@ -20,8 +20,8 @@ use crate::relation::Relation;
 use crate::siqs_generator::*;
 use crate::trial_division::TrialDivision;
 
-/// A full or partial relation sent from a producer (sieving) thread to the
-/// consumer, with the index of the producer.
+/// A full or partial relation sent from a sieving thread to the collecting
+/// thread, with the index of the sieving thread.
 type RelationMsg = (Relation, usize);
 
 /// Slack multiplier for the sieve threshold, in units of the large-prime bound's
@@ -160,15 +160,14 @@ impl SieveParams {
     }
 }
 
-/// One producer thread: repeatedly sieve a polynomial, scan for survivors, factor
+/// One sieving thread: repeatedly sieve a polynomial, scan for candidates, factor
 /// each over the factor base, and send the resulting (partial) relations to the
-/// consumer. Shared by [`quadratic_sieve_multithreaded`] and
-/// [`quadratic_sieve_lanczos`] so the sieving hot path has a single definition.
+/// collecting thread.
 fn run_sieve_producer(
     index_thread: usize,
     polynomial_generator: &mut SIQSPolynomialData,
     params: &SieveParams,
-    sender: &mpsc::Sender<RelationMsg>,
+    sender: &mpsc::SyncSender<RelationMsg>,
 ) {
     let sieve_interval_length = params.sieve_interval_length;
     let kn_bits = params.kn.significant_bits();
@@ -198,9 +197,9 @@ fn run_sieve_producer(
     let mut prof_candidates = 0u64;
     let mut prof_relations = [0u64; 3];
 
-    // Producers run forever: a producer never decides on its own to stop. The
-    // consumer is the sole authority that terminates them — it drops the relation
-    // receiver, and the next `send` below then fails and breaks `'outer_loop`.
+    // A sieving thread never decides on its own to stop: it runs until the
+    // collecting thread drops the relation receiver, and the next `send` below then
+    // fails and breaks `'outer_loop`.
     'outer_loop: loop {
         let prof_t0 = Instant::now();
         let (polynomial, roots) = polynomial_generator.next_polynomial();
@@ -343,244 +342,134 @@ fn find_candidates_scalar(logs: &[u8], threshold: u8, offset: usize, candidates:
     }
 }
 
-pub fn quadratic_sieve_multithreaded(
-    n: &Integer,
-    num_threads: usize,
-) -> Result<Option<Integer>, NumberTheoryError> {
-    let params = SieveParams::new(n)?;
-    let mut polynomial_generators = params.polynomial_generators(num_threads);
-    let n = Arc::new(n);
-    let shared_factor = Arc::new(Mutex::new(None));
-    rayon::scope(|s| {
-        let (sender, receiver) = mpsc::channel::<RelationMsg>();
-        // consumer thread: processes (partial) relations
-        {
-            let shared_factor = Arc::clone(&shared_factor);
-            let n = Arc::clone(&n);
-            let params = &params;
-            s.spawn(move |_| {
-                let factorbase_size = params.factorbase.len();
-                // set up matrix for relations over the factorbase
-                let mut relations = Relations::new(factorbase_size);
-                // combines (partial) relations into full ones: a single-prime hash map
-                // without the double large prime variation, the cycle graph with it
-                let mut partial_relations = PartialStore::new(params.use_dlp);
-                // time each 10% progress step (same step as add_relation's `(k)` report)
-                // and flag the slow ones. `step` mirrors Relations::add_relation.
-                let progress_step = (factorbase_size / 10).max(1);
-                let mut last_step_time = Instant::now();
+/// Relations that may wait in the channel before the sieving threads block: enough
+/// to absorb bursts, few enough to bound the memory if the collecting thread falls
+/// behind.
+const CHANNEL_CAPACITY: usize = 1024;
 
-                loop {
-                    // all producers have exited and dropped their senders: stop.
-                    let Ok((relation, index_thread)) = receiver.recv() else {
-                        return;
-                    };
-                    // full relations go straight to the matrix; partials (one or two
-                    // large primes) are routed through the partial-relation graph,
-                    // which yields a full relation only when it closes a cycle.
-                    let full = if relation.is_full() {
-                        debug_print!("{}", format_color("+", index_thread));
-                        Some(relation)
-                    } else {
-                        match partial_relations.add(relation) {
-                            Some(full) => {
-                                debug_print!("{}", format_color(":", index_thread));
-                                Some(full)
-                            }
-                            None => {
-                                debug_print!("{}", format_color(".", index_thread));
-                                None
-                            }
-                        }
-                    };
-                    let Some(relation) = full else {
-                        continue;
-                    };
-                    relations.add_relation(&relation.factors, (relation.u, relation.v));
-                    // when a 10% step boundary is crossed, report its time if it was slow
-                    let count = relations.len();
-                    if count.is_multiple_of(progress_step) {
-                        let elapsed = last_step_time.elapsed();
-                        if elapsed > Duration::from_secs(5) {
-                            print!("({} {} ms)", count / progress_step, elapsed.as_millis());
-                            io::stdout().flush().unwrap();
-                        }
-                        last_step_time = Instant::now();
-                    }
-                    // Gaussian elimination
-                    if let Some(relation) = relations.gaussian_elimination() {
-                        debug_print!("{}", format_color("!", index_thread));
-                        if let Some(factor) = relations.find_factor(&relation, &n) {
-                            // dropping the receiver makes every producer's next
-                            // `send` fail, terminating them.
-                            drop(receiver);
-                            println!("\nfound factor: {factor} (thread #{index_thread})");
-                            io::stdout().flush().unwrap();
-                            *shared_factor.lock().unwrap() = Some(factor);
-                            return;
-                        }
-                        // relation was not useful, drop the last relation
-                        relations.drop_last_relation();
-                    }
-                }
-            });
-        }
-
-        spawn_sieve_producers(s, &mut polynomial_generators, &params, &sender);
-        // drop the original sender so the consumer's recv() terminates once every
-        // producer (each holding a clone) has exited.
-        drop(sender);
-    });
-    Ok(shared_factor.lock().unwrap().clone())
-}
-
-/// Spawn one producer thread per polynomial generator into the rayon scope, each
-/// with a clone of the relation sender. Shared by both solvers.
-fn spawn_sieve_producers<'scope, 'env>(
-    s: &rayon::Scope<'scope>,
-    polynomial_generators: &'scope mut [SIQSPolynomialData<'env>],
-    params: &'scope SieveParams,
-    sender: &mpsc::Sender<RelationMsg>,
-) {
-    for (index_thread, polynomial_generator) in polynomial_generators.iter_mut().enumerate() {
-        let sender = sender.clone();
-        s.spawn(move |_| {
-            run_sieve_producer(index_thread, polynomial_generator, params, &sender);
-        });
-    }
-}
-
-/// Block Lanczos variant: collect a full batch of relations, then solve the linear
-/// algebra once with [`SparseRelations::dependencies_lanczos`] instead of the
-/// incremental dense Gaussian elimination used by [`quadratic_sieve_multithreaded`].
+/// Factors n with the self-initializing quadratic sieve. Returns a factor, or `None`
+/// if no dependency gives one.
 ///
-/// The producer (sieving) side is identical; only the consumer differs: it routes
-/// partials through the same combiner but accumulates the full relations sparsely
-/// until it has `factorbase_size + RELATION_SURPLUS` of them, then runs Block Lanczos
-/// and tries each returned dependency through `find_factor`. This trades the
-/// incremental "stop as soon as a dependency appears" early exit for an O(n²) (rather
-/// than O(n³)) linear-algebra phase — the right tradeoff once the factor base is large.
+/// `num_threads` threads sieve and send their relations to the calling thread,
+/// which combines the partial ones and collects the full ones until there are 192
+/// more than primes appearing in them. Then Block Lanczos
+/// ([`SparseRelations::dependencies_lanczos`]) finds dependencies, on
+/// `num_threads + 1` threads, and each is tried until one gives a factor.
 pub fn quadratic_sieve_lanczos(
     n: &Integer,
     num_threads: usize,
 ) -> Result<Option<Integer>, NumberTheoryError> {
-    // surplus relations beyond the number of appearing primes, so the kernel (hence
-    // the number of dependencies) is at least this large. Kept comfortably above the
-    // 64-wide Block Lanczos block so the kernel dimension never sits exactly on the
-    // block boundary (the degenerate case where a single block can fail to capture it).
-    const RELATION_SURPLUS: usize = 192;
     // fixed seed for the randomized starting block, for reproducible runs
     const LANCZOS_SEED: u64 = 0x5161_7A9F_2C3D_4E5F;
 
     let params = SieveParams::new(n)?;
     let mut polynomial_generators = params.polynomial_generators(num_threads);
-    let n = Arc::new(n);
-    let shared_factor = Arc::new(Mutex::new(None));
-    rayon::scope(|s| {
-        let (sender, receiver) = mpsc::channel::<RelationMsg>();
-        // consumer thread: combine partials, accumulate full relations, then solve
-        {
-            let shared_factor = Arc::clone(&shared_factor);
-            let n = Arc::clone(&n);
-            let params = &params;
-            s.spawn(move |_| {
-                let factorbase_size = params.factorbase.len();
-                // combines (partial) relations into full ones (shared, global state)
-                let mut partial_relations = PartialStore::new(params.use_dlp);
-                // full relations collected sparsely for the batch linear algebra
-                let mut sparse = SparseRelations::new(factorbase_size);
-                // which factor-base primes have actually appeared: the matrix only
-                // needs a surplus over *these*, not over the full factor base (for
-                // small N most large primes never divide any Q(x)).
-                let mut appeared = vec![false; factorbase_size];
-                let mut appeared_count = 0usize;
-
-                // progress: report every 10% of the (estimated) max relations needed.
-                // The actual target is appeared_count + RELATION_SURPLUS; appeared_count
-                // is bounded by the factor base, so this is the upper bound.
-                let max_relations = factorbase_size + RELATION_SURPLUS;
-                let progress_step = (max_relations / 10).max(1);
-                let collection_start = Instant::now();
-                // time each 10% step so slow ones can be flagged
-                let mut last_step_time = collection_start;
-
-                // Producers run forever; this consumer is the sole authority that
-                // stops them. Collect until we hold RELATION_SURPLUS more relations
-                // than distinct primes appearing — then the kernel (hence the number
-                // of dependencies) is at least that big. Relations with equal parity
-                // vectors are kept: together they form a dependency.
-                while sparse.len() < appeared_count + RELATION_SURPLUS {
-                    let Ok((relation, index_thread)) = receiver.recv() else {
-                        // Producers never exit on their own, so a closed channel can
-                        // only mean a producer panicked: nothing more will arrive.
-                        break;
-                    };
-                    let full = if relation.is_full() {
-                        debug_print!("{}", format_color("+", index_thread));
-                        Some(relation)
-                    } else {
-                        match partial_relations.add(relation) {
-                            Some(full) => {
-                                debug_print!("{}", format_color(":", index_thread));
-                                Some(full)
-                            }
-                            None => {
-                                debug_print!("{}", format_color(".", index_thread));
-                                None
-                            }
-                        }
-                    };
-                    if let Some(relation) = full {
-                        for &c in &relation.factors {
-                            if !appeared[c as usize] {
-                                appeared[c as usize] = true;
-                                appeared_count += 1;
-                            }
-                        }
-                        sparse.push_sparse(relation.factors, (relation.u, relation.v));
-                        if sparse.len().is_multiple_of(progress_step) {
-                            let step = sparse.len() / progress_step;
-                            let elapsed = last_step_time.elapsed();
-                            print!("({step}: {} ms)", elapsed.as_millis());
-                            io::stdout().flush().unwrap();
-                            last_step_time = Instant::now();
-                        }
-                    }
-                }
-                // Enough relations collected: terminate every producer — dropping the
-                // receiver makes their next `send` fail — then run the linear algebra.
-                drop(receiver);
-                let collection_time = collection_start.elapsed();
-                println!(
-                    "\ncollected {} relations ({appeared_count} primes appearing) \
-                     in {collection_time:.2?}; running Block Lanczos with {} threads…",
-                    sparse.len(),
-                    num_threads + 1
-                );
-                io::stdout().flush().unwrap();
-                let lanczos_start = Instant::now();
-                let dependencies = sparse.dependencies_lanczos(LANCZOS_SEED, num_threads + 1);
-                let lanczos_time = lanczos_start.elapsed();
-                println!(
-                    "Block Lanczos returned {} dependencies in {lanczos_time:.2?}",
-                    dependencies.len()
-                );
-                for dependency in &dependencies {
-                    if let Some(factor) = sparse.find_factor(dependency, &n) {
-                        println!("found factor: {factor}");
-                        io::stdout().flush().unwrap();
-                        *shared_factor.lock().unwrap() = Some(factor);
-                        return;
-                    }
-                }
-                println!("no factor found among the dependencies");
+    let relations = thread::scope(|s| {
+        let (sender, receiver) = mpsc::sync_channel(CHANNEL_CAPACITY);
+        for (index_thread, polynomial_generator) in polynomial_generators.iter_mut().enumerate() {
+            let (params, sender) = (&params, sender.clone());
+            s.spawn(move || {
+                run_sieve_producer(index_thread, polynomial_generator, params, &sender)
             });
         }
-
-        spawn_sieve_producers(s, &mut polynomial_generators, &params, &sender);
+        // The sieving threads hold the only senders now. They run until the receiver
+        // is dropped when collect_relations returns: then their next send fails.
         drop(sender);
+        collect_relations(receiver, &params)
     });
-    Ok(shared_factor.lock().unwrap().clone())
+    let lanczos_start = Instant::now();
+    let dependencies = relations.dependencies_lanczos(LANCZOS_SEED, num_threads + 1);
+    println!(
+        "Block Lanczos on {} threads returned {} dependencies in {:.2?}",
+        num_threads + 1,
+        dependencies.len(),
+        lanczos_start.elapsed()
+    );
+    let factor = dependencies
+        .iter()
+        .find_map(|dependency| relations.find_factor(dependency, n));
+    match &factor {
+        Some(factor) => println!("found factor: {factor}"),
+        None => println!("no factor found among the dependencies"),
+    }
+    io::stdout().flush().unwrap();
+    Ok(factor)
+}
+
+/// Receives the relations of the sieving threads and combines the partial ones,
+/// until there are `RELATION_SURPLUS` more full relations than primes appearing in
+/// them: then the kernel, hence the number of dependencies, is at least that big.
+/// Relations with equal parity vectors are kept: together they form a dependency.
+fn collect_relations(
+    receiver: mpsc::Receiver<RelationMsg>,
+    params: &SieveParams,
+) -> SparseRelations {
+    // Kept comfortably above the 64-wide Block Lanczos block so the kernel dimension
+    // never sits exactly on the block boundary (the degenerate case where a single
+    // block can fail to capture it).
+    const RELATION_SURPLUS: usize = 192;
+
+    let factorbase_size = params.factorbase.len();
+    // combines partial relations into full ones: a single-prime hash map without the
+    // double large prime variation, the cycle graph with it
+    let mut partial_relations = PartialStore::new(params.use_dlp);
+    // full relations collected sparsely for the batch linear algebra
+    let mut sparse = SparseRelations::new(factorbase_size);
+    // which factor-base primes have actually appeared: the matrix only needs a
+    // surplus over *these*, not over the full factor base (for small N most large
+    // primes never divide any Q(x)).
+    let mut appeared = vec![false; factorbase_size];
+    let mut appeared_count = 0usize;
+
+    // progress: report every 10% of the (estimated) max relations needed. The actual
+    // target is appeared_count + RELATION_SURPLUS; appeared_count is bounded by the
+    // factor base, so this is the upper bound.
+    let max_relations = factorbase_size + RELATION_SURPLUS;
+    let progress_step = (max_relations / 10).max(1);
+    let collection_start = Instant::now();
+    // time each 10% step so slow ones can be flagged
+    let mut last_step_time = collection_start;
+
+    while sparse.len() < appeared_count + RELATION_SURPLUS {
+        // The sieving threads never exit on their own, so a closed channel can only
+        // mean that they panicked: nothing more will arrive.
+        let Ok((relation, index_thread)) = receiver.recv() else {
+            break;
+        };
+        // full relations go straight to the matrix; partials (one or two large
+        // primes) are routed through the partial-relation graph, which yields a full
+        // relation only when it closes a cycle.
+        let relation = if relation.is_full() {
+            debug_print!("{}", format_color("+", index_thread));
+            relation
+        } else if let Some(full) = partial_relations.add(relation) {
+            debug_print!("{}", format_color(":", index_thread));
+            full
+        } else {
+            debug_print!("{}", format_color(".", index_thread));
+            continue;
+        };
+        for &c in &relation.factors {
+            if !appeared[c as usize] {
+                appeared[c as usize] = true;
+                appeared_count += 1;
+            }
+        }
+        sparse.push_sparse(relation.factors, (relation.u, relation.v));
+        if sparse.len().is_multiple_of(progress_step) {
+            let step = sparse.len() / progress_step;
+            let elapsed = last_step_time.elapsed();
+            print!("({step}: {} ms)", elapsed.as_millis());
+            io::stdout().flush().unwrap();
+            last_step_time = Instant::now();
+        }
+    }
+    println!(
+        "\ncollected {} relations ({appeared_count} primes appearing) in {:.2?}",
+        sparse.len(),
+        collection_start.elapsed()
+    );
+    sparse
 }
 
 #[cfg(test)]

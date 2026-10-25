@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use rug::Integer;
 
-use siqs::sieve::{quadratic_sieve_lanczos, quadratic_sieve_multithreaded};
+use siqs::sieve::quadratic_sieve_lanczos;
 
 fn main() {
     // Other example inputs:
@@ -16,12 +16,6 @@ fn main() {
     let num_threads = 7;
 
     let now = Instant::now();
-    let factor = quadratic_sieve_multithreaded(&n, num_threads)
-        .unwrap()
-        .expect("No factor found.");
-    let elapsed_time = now.elapsed();
-    println!("factor1 = {factor} ({} ms)", elapsed_time.as_millis());
-    let now = Instant::now();
     let factor = quadratic_sieve_lanczos(&n, num_threads)
         .unwrap()
         .expect("No factor found.");
@@ -34,12 +28,6 @@ fn main() {
         .unwrap();
     let num_threads = 7;
 
-    /*let now = Instant::now();
-    let factor = quadratic_sieve_multithreaded(&n, num_threads)
-        .unwrap()
-        .expect("No factor found.");
-    let elapsed_time = now.elapsed();
-    println!("factor1 = {factor} ({} ms)", elapsed_time.as_millis());*/
     let now = Instant::now();
     let factor = quadratic_sieve_lanczos(&n, num_threads)
         .unwrap()

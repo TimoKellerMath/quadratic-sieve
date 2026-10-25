@@ -3,7 +3,6 @@ pub mod constants;
 pub mod debug_print;
 pub mod factorbase;
 pub mod format_color;
-pub mod gauss;
 pub mod large_primes;
 pub mod linalg;
 pub mod multiplier;
