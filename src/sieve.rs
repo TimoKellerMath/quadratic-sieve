@@ -108,6 +108,10 @@ fn run_sieve_producer(
     let mut prof_poly = Duration::ZERO;
     let mut prof_sieve = Duration::ZERO;
     let mut prof_scan = Duration::ZERO;
+    // candidates passed to trial division, and the relations found among them
+    // with zero, one or two large primes
+    let mut prof_candidates = 0u64;
+    let mut prof_relations = [0u64; 3];
 
     // Producers run forever: a producer never decides on its own to stop. The
     // consumer is the sole authority that terminates them — it drops the relation
@@ -180,6 +184,7 @@ fn run_sieve_producer(
                             m &= m - 1;
                             let idx = i + j;
                             let x = (idx as i32) - (sieve_interval_length as i32);
+                            prof_candidates += 1;
                             evaluate_polynomial_at(
                                 x,
                                 &polynomial,
@@ -199,6 +204,7 @@ fn run_sieve_producer(
                                 &mut factor_scratch,
                                 &mut relation_scratch,
                             ) {
+                                prof_relations[(p != 1) as usize + (q != 1) as usize] += 1;
                                 if sender
                                     .send((
                                         u_scratch.clone(),
@@ -222,6 +228,7 @@ fn run_sieve_producer(
                 let log = logs_for_polynomial[i];
                 if log >= threshold {
                     let x = (i as i32) - (sieve_interval_length as i32);
+                    prof_candidates += 1;
                     evaluate_polynomial_at(x, &polynomial, kn, &mut u_scratch, &mut v_scratch);
                     if let Some((relation, p, q)) = factor_over_factorbase(
                         x,
@@ -235,6 +242,7 @@ fn run_sieve_producer(
                         &mut factor_scratch,
                         &mut relation_scratch,
                     ) {
+                        prof_relations[(p != 1) as usize + (q != 1) as usize] += 1;
                         if sender
                             .send((
                                 u_scratch.clone(),
@@ -264,12 +272,18 @@ fn run_sieve_producer(
                 let calls = SIEVE_CALLS.load(Ordering::Relaxed).max(1);
                 let setup = SIEVE_SETUP_NANOS.load(Ordering::Relaxed) / calls / 1000;
                 let bloop = SIEVE_LOOP_NANOS.load(Ordering::Relaxed) / calls / 1000;
+                let polys = prof_polys as f64;
                 eprintln!(
                     "[profile] {prof_polys} polys | per poly: poly {:.0}us \
-                     sieve {:.0}us (setup {setup}us loop {bloop}us) scan+factor {:.0}us",
-                    prof_poly.as_micros() as f64 / prof_polys as f64,
-                    prof_sieve.as_micros() as f64 / prof_polys as f64,
-                    prof_scan.as_micros() as f64 / prof_polys as f64,
+                     sieve {:.0}us (setup {setup}us loop {bloop}us) scan+factor {:.0}us | \
+                     candidates {:.2} relations: full {:.4} 1LP {:.4} 2LP {:.4}",
+                    prof_poly.as_micros() as f64 / polys,
+                    prof_sieve.as_micros() as f64 / polys,
+                    prof_scan.as_micros() as f64 / polys,
+                    prof_candidates as f64 / polys,
+                    prof_relations[0] as f64 / polys,
+                    prof_relations[1] as f64 / polys,
+                    prof_relations[2] as f64 / polys,
                 );
             }
         }
