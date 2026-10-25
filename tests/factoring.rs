@@ -144,3 +144,40 @@ fn factors_250_bit() {
     let (n, _, _) = semiprime(125, 125);
     check_factor(&n, 7);
 }
+
+/// Pseudo-random semiprimes from 40 to 100 bits in steps of 4: for each size, one
+/// with factors of about half the size and one with factors of about a third and
+/// two thirds of it.
+fn random_semiprimes() -> Vec<Integer> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut random_prime = |bits: u32| {
+        let random = (Integer::from(next()) << 64u32) | Integer::from(next());
+        // exactly `bits` bits, then the next prime
+        ((random >> (128 - bits)) | (Integer::from(1) << (bits - 1))).next_prime()
+    };
+    let mut semiprimes = Vec::new();
+    for bits in (40..=100).step_by(4) {
+        for p_bits in [bits / 2, bits / 3] {
+            let p = random_prime(p_bits);
+            let q = random_prime(bits - p_bits);
+            if p != q {
+                semiprimes.push(p * q);
+            }
+        }
+    }
+    semiprimes
+}
+
+#[test]
+fn factors_random_semiprimes_with_both_solvers() {
+    for n in random_semiprimes() {
+        check_factor(&n, 2);
+        check_factor_lanczos(&n, 2);
+    }
+}
