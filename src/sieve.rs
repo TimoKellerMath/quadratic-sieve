@@ -8,11 +8,8 @@ use rug::Integer;
 use fixedbitset::FixedBitSet;
 use rustc_hash::FxHashSet;
 
-// debug_print! expands to nothing in release, leaving format_color unused there.
-#[allow(unused_imports)]
 use crate::debug_print;
 use crate::factorbase::*;
-#[allow(unused_imports)]
 use crate::format_color::format_color;
 use crate::linalg::*;
 use crate::multiplier::*;
