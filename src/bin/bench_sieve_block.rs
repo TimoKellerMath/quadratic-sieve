@@ -81,7 +81,6 @@ fn main() {
     let mut buffer = vec![0u8; total_len];
     let mut next_pos: Vec<usize> = Vec::with_capacity(2 * factorbase.len());
     let mut buckets = relations::Buckets::default();
-    let reciprocals = siqs::factorbase::compute_reciprocals(&factorbase);
 
     // block sizes to test
     let block_sizes = vec![1024usize, 4096, 16384, 32768, 65536, 2 * 65536, 4 * 65536];
@@ -98,7 +97,6 @@ fn main() {
             sieve_interval_length,
             &factorbase,
             &roots,
-            &reciprocals,
             &logs,
             &mut buffer,
             &mut next_pos,
@@ -113,7 +111,6 @@ fn main() {
                 sieve_interval_length,
                 &factorbase,
                 &roots,
-                &reciprocals,
                 &logs,
                 &mut buffer,
                 &mut next_pos,

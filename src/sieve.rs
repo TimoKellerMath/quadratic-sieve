@@ -126,7 +126,6 @@ fn run_sieve_producer(
             sieve_interval_length,
             factorbase,
             roots,
-            reciprocals,
             logs,
             &mut logs_for_polynomial,
             &mut next_pos,

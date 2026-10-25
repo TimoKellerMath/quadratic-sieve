@@ -35,15 +35,6 @@ impl SparseRelations {
         }
     }
 
-    /// Append a full relation given as the set of factor-base columns with odd
-    /// exponent (a `FixedBitSet` over the factor base, as produced during sieving)
-    /// together with its `(u, v)`.
-    pub fn push(&mut self, relation: &FixedBitSet, uv: (Integer, Integer)) {
-        debug_assert!(relation.len() <= self.num_columns);
-        self.rows.push(relation.ones().map(|c| c as u32).collect());
-        self.uvs.push(uv);
-    }
-
     /// Append a relation already in sparse column form.
     pub fn push_sparse(&mut self, columns: Vec<u32>, uv: (Integer, Integer)) {
         debug_assert!(columns.iter().all(|&c| (c as usize) < self.num_columns));
@@ -65,18 +56,6 @@ impl SparseRelations {
 
     pub fn rows(&self) -> &[Vec<u32>] {
         &self.rows
-    }
-
-    /// Debug check: do the rows in `dependency` XOR to the zero vector (i.e. is it a
-    /// genuine factor-base parity dependency)?
-    pub fn dependency_xor_is_zero(&self, dependency: &[usize]) -> bool {
-        let mut acc = vec![false; self.num_columns];
-        for &j in dependency {
-            for &c in &self.rows[j] {
-                acc[c as usize] ^= true;
-            }
-        }
-        acc.iter().all(|&b| !b)
     }
 
     /// A basis of the left null space over GF(2): every returned entry is a set of

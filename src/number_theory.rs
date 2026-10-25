@@ -6,8 +6,6 @@ use rug::integer::IsPrime;
 use rug::{Complete, Integer};
 //use rug::ops::DivRounding;
 
-use rand::Rng;
-
 // TODO: use rug's Error
 #[derive(Debug, Clone)]
 pub enum NumberTheoryError {
@@ -54,20 +52,6 @@ pub const SMALL_PRIMES: [u32; 168] = [
     809, 811, 821, 823, 827, 829, 839, 853, 857, 859, 863, 877, 881, 883, 887, 907, 911, 919, 929,
     937, 941, 947, 953, 967, 971, 977, 983, 991, 997,
 ];
-
-// return a small prime factor of n
-#[inline]
-pub fn trial_division(n: &Integer) -> Option<u32> {
-    SMALL_PRIMES
-        .iter()
-        .find_map(|&p| if n.is_divisible_u(p) { Some(p) } else { None })
-}
-
-// return true if n is divisible by a small prime and not equal to a small prime
-#[inline]
-pub fn is_small_composite(n: &Integer) -> bool {
-    SMALL_PRIMES.iter().any(|&p| *n != p && n.is_divisible_u(p))
-}
 
 // Montgomery arithmetic modulo an odd `n`, replacing the per-multiply 128-bit
 // division of a plain `(a * b) % n` with the cheaper REDC reduction. Values are held
@@ -361,66 +345,6 @@ pub fn factor_out_power_of_2(a: &Integer) -> (Integer, u32) {
     (a_, k)
 }
 
-pub fn is_pseudo_prime(n: &Integer, num_tries: usize) -> bool {
-    if n <= &Integer::from(1) {
-        return false;
-    }
-    if n <= &Integer::from(3) {
-        return true;
-    }
-    if n.is_even() || is_small_composite(n) {
-        // even and != 2?
-        return false;
-    }
-    let n_minus_one = n - Integer::from(1);
-    let (odd_part, power_of_2) = factor_out_power_of_2(&n_minus_one);
-
-    let mut rng = rand::thread_rng();
-    'outer: for _ in 0..num_tries {
-        // Miller-Rabin test
-        let base = Integer::from(rng.gen_range(2..1024));
-        if base.gcd_ref(n).complete() != 1 {
-            return false;
-        }
-
-        let mut a = base.pow_mod_ref(&odd_part, n).unwrap().complete();
-        if a == 1 {
-            continue;
-        }
-        for _ in 0..power_of_2 {
-            if a == n_minus_one {
-                // a = -1 (n)
-                continue 'outer;
-            }
-            a = square_mod_p(&a, n);
-        }
-        if a != 1 {
-            return false;
-        }
-    }
-    true
-}
-
-pub fn next_pseudo_prime(n: &Integer, num_tries: usize) -> Integer {
-    if n <= &Integer::from(1) {
-        return Integer::from(2);
-    }
-    if n == &Integer::from(2) {
-        return Integer::from(3);
-    }
-    let mut p = n.clone(); // n >= 3
-    if p.is_even() {
-        // ensure p odd
-        p += 1;
-    }
-    loop {
-        p += 2;
-        if is_pseudo_prime(&p, num_tries) {
-            return p;
-        }
-    }
-}
-
 // compute a quadratic non-residue mod p
 pub fn quadratic_non_residue_mod_p(p: &Integer) -> Result<Integer, NumberTheoryError> {
     if p.is_even() {
@@ -509,24 +433,6 @@ pub fn square_root_mod_p(a: &Integer, p: &Integer) -> Result<Integer, NumberTheo
     Ok(square_root)
 }
 
-// one square root of x (mod p^2)
-// s^2 = x (p)  ==>
-// S^2 = x (p^2) with S = (s + x s^-1)/2 = (s^2 + x)(2s)^-1 (mod p^2)
-pub fn square_root_mod_p2(x: &Integer, p: &Integer) -> Result<Integer, NumberTheoryError> {
-    debug_assert!(p > &Integer::from(2));
-    let sqrt_mod_p: Integer = square_root_mod_p(x, p)?;
-    //debug_assert!((sqrt_mod_p.clone().square() - x).is_divisible(&p));
-    let p_square = p.square_ref().complete();
-    let mut a: Integer = (&sqrt_mod_p << 1u32).complete();
-    match a.invert_mut(&p_square) {
-        // a = (2s)^-1 (mod p^2)
-        Ok(()) => (),
-        Err(_) => return Err(NumberTheoryError::NotCoprime(a, p_square)),
-    }
-    let sqrt_mod_p2 = ((sqrt_mod_p.square_ref() + x).complete() * a) % p_square; // S = (s^2 + x)/(2s) (mod p^2)
-    Ok(sqrt_mod_p2)
-}
-
 // Input: sqrt_mod_q^2 = x (mod q)
 // Assume: gcd(2 * sqrt_mod_q, q) = 1
 // Output: a^2 = x (mod q^2)
@@ -548,47 +454,8 @@ pub fn lift_square_root_mod_q2(
     Ok(sqrt_mod_q2)
 }
 
-// compute (a,n) with a = a_i (mod n_i)
-pub fn chinese_remainder_theorem(
-    residues_and_moduli: &[(&Integer, &Integer)],
-) -> Result<(Integer, Integer), NumberTheoryError> {
-    let mut n_result = Integer::from(1);
-    let mut a_result = Integer::from(0);
-    // TODO: consider doing it directly
-    for (a, n) in residues_and_moduli.iter() {
-        // a' = a (n)
-        // a' = a_result (n_result)
-        // a' = a n_result (n_result^-1 mod n) + a_result n (n^-1 mod a_result)
-        let n_result_inverse = match n_result.invert_ref(n) {
-            Some(a) => a,
-            None => {
-                return Err(NumberTheoryError::NotCoprime(
-                    n_result.clone(),
-                    (*n).clone(),
-                ));
-            }
-        };
-        let n_inverse = match n.invert_ref(&n_result) {
-            Some(a) => a,
-            None => {
-                return Err(NumberTheoryError::NotCoprime(
-                    n_result.clone(),
-                    (*n).clone(),
-                ));
-            }
-        };
-        //a_result = *a * n_result.clone() * n_result_inverse.complete() + a_result * *n * n_inverse.complete();
-        a_result *= *n * n_inverse.complete();
-        a_result += *a * n_result.clone() * n_result_inverse.complete();
-        n_result *= *n;
-    }
-    Ok((a_result, n_result.clone()))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
     use rug::integer::IsPrime;
 
     use super::*;
@@ -664,12 +531,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_pseudoprime() {
-        let p = Integer::from_str("16777217").unwrap(); // Carmichael number!
-        assert_eq!(p.is_probably_prime(10), IsPrime::No);
-    }
-
-    #[test]
     fn test_shanks_tonelli() {
         let mut p = Integer::from(2);
         for _ in 0..100 {
@@ -697,28 +558,15 @@ mod tests {
     }
 
     #[test]
-    fn test_square_root_mod_p2() {
-        let p = Integer::from(97);
+    fn test_lift_square_root_mod_q2() {
+        let q = Integer::from(97);
         for n in 1..97 {
             let a = Integer::from(n);
-            if a.legendre(&p) == 1 {
-                let x = square_root_mod_p2(&a, &p);
-                match x {
-                    Ok(x) => assert_eq!(x.square() % p.clone().square(), a),
-                    Err(_) => panic!("tried to take root of non-square"),
-                }
+            if a.legendre(&q) == 1 {
+                let root = square_root_mod_p(&a, &q).unwrap();
+                let lifted = lift_square_root_mod_q2(&a, &root, &q).unwrap();
+                assert_eq!(lifted.square() % q.clone().square(), a);
             }
         }
-    }
-
-    #[test]
-    fn test_crt() {
-        if let Ok((a, _)) = chinese_remainder_theorem(&[
-            (&Integer::from(1), &Integer::from(10)),
-            (&Integer::from(2), &Integer::from(137)),
-        ]) {
-            assert_eq!(a.clone() % 10, 1);
-            assert_eq!(a.clone() % 137, 2);
-        };
     }
 }
