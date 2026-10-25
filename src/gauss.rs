@@ -21,7 +21,11 @@ impl Relations {
     }
 
     #[inline]
-    pub fn add_relation(&mut self, relation: FixedBitSet, xy: (Integer, Integer)) {
+    pub fn add_relation(&mut self, factors: &[u32], xy: (Integer, Integer)) {
+        let mut relation = FixedBitSet::with_capacity(self.factorbase_size());
+        for &i in factors {
+            relation.insert(i as usize);
+        }
         self.relations.push(relation);
         // relations.len() transiently reaches factorbase_size + 1: the rank can
         // grow up to factorbase_size, and the next relation is pushed (setting bit
@@ -102,22 +106,13 @@ impl Relations {
 mod tests {
     use super::*;
 
-    // a relation over `len` columns with the given bits set
-    fn bits(ones: &[usize], len: usize) -> FixedBitSet {
-        let mut relation = FixedBitSet::with_capacity(len);
-        for &i in ones {
-            relation.insert(i);
-        }
-        relation
-    }
-
     // 90^2 - 8051 = 7^2: one relation with a square v and an empty parity vector
     // is a dependency on its own, and gives 8051 = 83 · 97.
     #[test]
     fn gaussian_elimination_and_find_factor_on_a_tiny_example() {
         let n = Integer::from(8051);
         let mut relations = Relations::new(4);
-        relations.add_relation(bits(&[], 4), (Integer::from(90), Integer::from(49)));
+        relations.add_relation(&[], (Integer::from(90), Integer::from(49)));
         let dependency = relations.gaussian_elimination().expect("a zero row");
         assert_eq!(dependency.ones().collect::<Vec<_>>(), vec![0]);
         let factor = relations.find_factor(&dependency, &n).expect("a factor");
@@ -128,15 +123,10 @@ mod tests {
     // overflow the index bitsets (3d42e99).
     #[test]
     fn gaussian_elimination_at_full_rank() {
-        let rows = [
-            bits(&[0], 3),
-            bits(&[1], 3),
-            bits(&[2], 3),
-            bits(&[0, 1], 3),
-        ];
+        let rows: [&[u32]; 4] = [&[0], &[1], &[2], &[0, 1]];
         let mut relations = Relations::new(3);
         for (i, row) in rows.iter().enumerate() {
-            relations.add_relation(row.clone(), (Integer::from(1), Integer::from(1)));
+            relations.add_relation(row, (Integer::from(1), Integer::from(1)));
             let dependency = relations.gaussian_elimination();
             if i < 3 {
                 assert!(dependency.is_none(), "row {i} is independent");

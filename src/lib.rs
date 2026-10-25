@@ -9,6 +9,7 @@ pub mod linalg;
 pub mod multiplier;
 pub mod number_theory;
 pub mod polynomial_generator;
+pub mod relation;
 pub mod sieve;
 pub mod siqs_generator;
 pub mod square_root;

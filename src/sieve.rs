@@ -5,9 +5,6 @@ use std::time::{Duration, Instant};
 
 use rug::Integer;
 
-use fixedbitset::FixedBitSet;
-use rustc_hash::FxHashSet;
-
 use crate::block_sieve::{
     Buckets, SIEVE_CALLS, SIEVE_LOOP_NANOS, SIEVE_SETUP_NANOS, sieve_over_factorbase_blocked,
 };
@@ -19,13 +16,13 @@ use crate::large_primes::PartialStore;
 use crate::linalg::*;
 use crate::multiplier::*;
 use crate::number_theory::*;
+use crate::relation::Relation;
 use crate::siqs_generator::*;
 use crate::trial_division::factor_over_factorbase;
 
-/// A (partial) relation sent from a producer (sieving) thread to the consumer:
-/// `(u, v, relation, p, q, index_thread)`, where `p`/`q` are the large primes
-/// (1 = none) and `relation` is the GF(2) exponent vector over the factor base.
-type RelationMsg = (Integer, Integer, FixedBitSet, u32, u32, usize);
+/// A full or partial relation sent from a producer (sieving) thread to the
+/// consumer, with the index of the producer.
+type RelationMsg = (Relation, usize);
 
 /// Slack multiplier for the sieve threshold, in units of the large-prime bound's
 /// log — `log2(large_prime_multiplier · p_max)`, the size of the biggest admissible
@@ -105,8 +102,8 @@ fn run_sieve_producer(
     let mut buckets = Buckets::default();
     // scratch integer reused by factor_over_factorbase per candidate
     let mut factor_scratch = Integer::new();
-    // scratch bitset reused across candidates (cloned out only on a hit)
-    let mut relation_scratch = FixedBitSet::with_capacity(factorbase.len());
+    // factor indices of a candidate, reused across candidates (cloned out on a hit)
+    let mut factors_scratch = Vec::new();
     // scratch (u, v) reused across candidates; cloned out only on a hit
     let mut u_scratch = Integer::new();
     let mut v_scratch = Integer::new();
@@ -196,7 +193,7 @@ fn run_sieve_producer(
                             let x = (idx as i32) - (sieve_interval_length as i32);
                             prof_candidates += 1;
                             polynomial.evaluate(x, kn, &mut u_scratch, &mut v_scratch);
-                            if let Some((relation, p, q)) = factor_over_factorbase(
+                            if let Some((factors, large_primes)) = factor_over_factorbase(
                                 x,
                                 &v_scratch,
                                 factorbase,
@@ -206,20 +203,16 @@ fn run_sieve_producer(
                                 large_prime_multiplier,
                                 use_dlp,
                                 &mut factor_scratch,
-                                &mut relation_scratch,
+                                &mut factors_scratch,
                             ) {
-                                prof_relations[(p != 1) as usize + (q != 1) as usize] += 1;
-                                if sender
-                                    .send((
-                                        u_scratch.clone(),
-                                        v_scratch.clone(),
-                                        relation,
-                                        p,
-                                        q,
-                                        index_thread,
-                                    ))
-                                    .is_err()
-                                {
+                                prof_relations[large_primes.count()] += 1;
+                                let relation = Relation {
+                                    u: u_scratch.clone(),
+                                    v: v_scratch.clone(),
+                                    factors,
+                                    large_primes,
+                                };
+                                if sender.send((relation, index_thread)).is_err() {
                                     break 'outer_loop;
                                 }
                             }
@@ -234,7 +227,7 @@ fn run_sieve_producer(
                     let x = (i as i32) - (sieve_interval_length as i32);
                     prof_candidates += 1;
                     polynomial.evaluate(x, kn, &mut u_scratch, &mut v_scratch);
-                    if let Some((relation, p, q)) = factor_over_factorbase(
+                    if let Some((factors, large_primes)) = factor_over_factorbase(
                         x,
                         &v_scratch,
                         factorbase,
@@ -244,20 +237,16 @@ fn run_sieve_producer(
                         large_prime_multiplier,
                         use_dlp,
                         &mut factor_scratch,
-                        &mut relation_scratch,
+                        &mut factors_scratch,
                     ) {
-                        prof_relations[(p != 1) as usize + (q != 1) as usize] += 1;
-                        if sender
-                            .send((
-                                u_scratch.clone(),
-                                v_scratch.clone(),
-                                relation,
-                                p,
-                                q,
-                                index_thread,
-                            ))
-                            .is_err()
-                        {
+                        prof_relations[large_primes.count()] += 1;
+                        let relation = Relation {
+                            u: u_scratch.clone(),
+                            v: v_scratch.clone(),
+                            factors,
+                            large_primes,
+                        };
+                        if sender.send((relation, index_thread)).is_err() {
                             break 'outer_loop;
                         }
                     }
@@ -350,7 +339,7 @@ pub fn quadratic_sieve_multithreaded(
     let kn = Arc::new(kn.clone());
     let shared_factor = Arc::new(Mutex::new(None));
     rayon::scope(|s| {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel::<RelationMsg>();
         // consumer thread: processes (partial) relations
         {
             let shared_factor = Arc::clone(&shared_factor);
@@ -368,20 +357,18 @@ pub fn quadratic_sieve_multithreaded(
                 let mut last_step_time = Instant::now();
 
                 loop {
-                    let received: Result<(Integer, Integer, FixedBitSet, u32, u32, usize), _> =
-                        receiver.recv();
                     // all producers have exited and dropped their senders: stop.
-                    let Ok((u, v, relation, p, q, index_thread)) = received else {
+                    let Ok((relation, index_thread)) = receiver.recv() else {
                         return;
                     };
                     // full relations go straight to the matrix; partials (one or two
                     // large primes) are routed through the partial-relation graph,
                     // which yields a full relation only when it closes a cycle.
-                    let full = if p == 1 && q == 1 {
+                    let full = if relation.is_full() {
                         debug_print!("{}", format_color("+", index_thread));
-                        Some((relation, u, v))
+                        Some(relation)
                     } else {
-                        match partial_relations.add(relation, u, v, p, q) {
+                        match partial_relations.add(relation) {
                             Some(full) => {
                                 debug_print!("{}", format_color(":", index_thread));
                                 Some(full)
@@ -392,10 +379,10 @@ pub fn quadratic_sieve_multithreaded(
                             }
                         }
                     };
-                    let Some((relation, u, v)) = full else {
+                    let Some(relation) = full else {
                         continue;
                     };
-                    relations.add_relation(relation, (u, v));
+                    relations.add_relation(&relation.factors, (relation.u, relation.v));
                     // when a 10% step boundary is crossed, report its time if it was slow
                     let count = relations.len();
                     if count.is_multiple_of(progress_step) {
@@ -561,7 +548,7 @@ pub fn quadratic_sieve_lanczos(
     let kn = Arc::new(kn.clone());
     let shared_factor = Arc::new(Mutex::new(None));
     rayon::scope(|s| {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::channel::<RelationMsg>();
         // consumer thread: combine partials, accumulate full relations, then solve
         {
             let shared_factor = Arc::clone(&shared_factor);
@@ -572,10 +559,6 @@ pub fn quadratic_sieve_lanczos(
                 let mut partial_relations = PartialStore::new(use_dlp);
                 // full relations collected sparsely for the batch linear algebra
                 let mut sparse = SparseRelations::new(factorbase.len());
-                // dedup: the sieve re-finds the same smooth values (identical parity
-                // rows are useless duplicates that inflate the relation count without
-                // adding rank), so collect each distinct parity vector at most once.
-                let mut seen: FxHashSet<Vec<u32>> = FxHashSet::default();
                 // which factor-base primes have actually appeared: the matrix only
                 // needs a surplus over *these*, not over the full factor base (for
                 // small N most large primes never divide any Q(x)).
@@ -592,20 +575,21 @@ pub fn quadratic_sieve_lanczos(
                 let mut last_step_time = collection_start;
 
                 // Producers run forever; this consumer is the sole authority that
-                // stops them. Collect until we hold RELATION_SURPLUS more distinct
-                // relations than distinct primes appearing — then the kernel (hence
-                // the number of dependencies) is at least that big.
+                // stops them. Collect until we hold RELATION_SURPLUS more relations
+                // than distinct primes appearing — then the kernel (hence the number
+                // of dependencies) is at least that big. Relations with equal parity
+                // vectors are kept: together they form a dependency.
                 while sparse.len() < appeared_count + RELATION_SURPLUS {
-                    let Ok((u, v, relation, p, q, index_thread)) = receiver.recv() else {
+                    let Ok((relation, index_thread)) = receiver.recv() else {
                         // Producers never exit on their own, so a closed channel can
                         // only mean a producer panicked: nothing more will arrive.
                         break;
                     };
-                    let full = if p == 1 && q == 1 {
+                    let full = if relation.is_full() {
                         debug_print!("{}", format_color("+", index_thread));
-                        Some((relation, u, v))
+                        Some(relation)
                     } else {
-                        match partial_relations.add(relation, u, v, p, q) {
+                        match partial_relations.add(relation) {
                             Some(full) => {
                                 debug_print!("{}", format_color(":", index_thread));
                                 Some(full)
@@ -616,23 +600,20 @@ pub fn quadratic_sieve_lanczos(
                             }
                         }
                     };
-                    if let Some((relation, u, v)) = full {
-                        let cols: Vec<u32> = relation.ones().map(|c| c as u32).collect();
-                        if seen.insert(cols.clone()) {
-                            for &c in &cols {
-                                if !appeared[c as usize] {
-                                    appeared[c as usize] = true;
-                                    appeared_count += 1;
-                                }
+                    if let Some(relation) = full {
+                        for &c in &relation.factors {
+                            if !appeared[c as usize] {
+                                appeared[c as usize] = true;
+                                appeared_count += 1;
                             }
-                            sparse.push_sparse(cols, (u, v));
-                            if sparse.len().is_multiple_of(progress_step) {
-                                let step = sparse.len() / progress_step;
-                                let elapsed = last_step_time.elapsed();
-                                print!("({step}: {} ms)", elapsed.as_millis());
-                                io::stdout().flush().unwrap();
-                                last_step_time = Instant::now();
-                            }
+                        }
+                        sparse.push_sparse(relation.factors, (relation.u, relation.v));
+                        if sparse.len().is_multiple_of(progress_step) {
+                            let step = sparse.len() / progress_step;
+                            let elapsed = last_step_time.elapsed();
+                            print!("({step}: {} ms)", elapsed.as_millis());
+                            io::stdout().flush().unwrap();
+                            last_step_time = Instant::now();
                         }
                     }
                 }
@@ -641,7 +622,7 @@ pub fn quadratic_sieve_lanczos(
                 drop(receiver);
                 let collection_time = collection_start.elapsed();
                 println!(
-                    "\ncollected {} distinct relations ({appeared_count} primes appearing) \
+                    "\ncollected {} relations ({appeared_count} primes appearing) \
                      in {collection_time:.2?}; running Block Lanczos with {} threads…",
                     sparse.len(),
                     num_threads + 1

@@ -1,7 +1,7 @@
 use crate::constants::NUM_SKIP_PRIMES;
 use crate::number_theory::{is_prime_u32, is_probable_prime_base2, pollard_rho_u64};
 use crate::polynomial_generator::Roots;
-use fixedbitset::FixedBitSet;
+use crate::relation::LargePrimes;
 use rug::{Assign, Integer};
 
 // Compute `x.rem_euclid(p)` (result in [0, p)) using a precomputed Barrett
@@ -24,10 +24,9 @@ fn x_mod_p(x_abs: u32, x_neg: bool, p: u32, recip: u64) -> u32 {
 }
 
 // try to factor y = Q(x) over factorbase, using resieve: only divide by p if x ≡ root (mod p).
-// On success returns the relation together with up to two large primes (1 = none):
-//   (relation, 1, 1)  full relation
-//   (relation, p, 1)  single-large-prime partial
-//   (relation, p, q)  double-large-prime partial (only produced when use_dlp is set)
+// On success returns the indices of the factor-base primes with odd exponent, in
+// increasing order, and the large primes left: none for a full relation, one or (only
+// when use_dlp is set) two for a partial one.
 pub fn factor_over_factorbase(
     x: i32,
     y: &Integer,
@@ -38,8 +37,8 @@ pub fn factor_over_factorbase(
     large_prime_multiplier: u32,
     use_dlp: bool,
     scratch: &mut Integer,
-    relation_scratch: &mut FixedBitSet,
-) -> Option<(FixedBitSet, u32, u32)> {
+    factors: &mut Vec<u32>,
+) -> Option<(Vec<u32>, LargePrimes)> {
     if y.is_zero() {
         return None;
     }
@@ -47,21 +46,19 @@ pub fn factor_over_factorbase(
     // candidate; assign reuses scratch's existing allocation.
     let y_ = scratch;
     y_.assign(y);
-    // Reuse the caller-owned bitset (capacity == factorbase.len()) rather than
-    // allocating one per candidate: most candidates fail, so this avoids a hot
-    // alloc/zero/free; the rare successful relation is cloned out at the return.
-    let relation = relation_scratch;
-    relation.clear();
+    // Collect the factors in the caller-owned scratch, reused across candidates;
+    // only the rare successful relation is cloned out at the return.
+    factors.clear();
     // -1 in factorbase
     if y_.is_negative() {
-        relation.set(0, true);
+        factors.push(0);
         y_.abs_mut();
     }
     // 2 in factorbase: divide out 2^exponent in place (y_ != 0 checked above)
     let exponent = y_.find_one(0).unwrap();
     *y_ >>= exponent;
     if exponent % 2 == 1 {
-        relation.set(1, true);
+        factors.push(1);
     }
 
     // indices 2..NUM_SKIP_PRIMES: sieve skips these, so trial-divide directly
@@ -72,10 +69,10 @@ pub fn factor_over_factorbase(
             exp += 1;
         }
         if exp & 1 == 1 {
-            relation.set(i, true);
+            factors.push(i as u32);
         }
         if *y_ == 1 {
-            return Some((relation.clone(), 1, 1));
+            return Some((factors.clone(), LargePrimes::NONE));
         }
     }
 
@@ -106,10 +103,10 @@ pub fn factor_over_factorbase(
                 exp += 1;
             }
             if exp & 1 == 1 {
-                relation.set(i, true);
+                factors.push(i as u32);
             }
             if *y_ == 1 {
-                return Some((relation.clone(), 1, 1));
+                return Some((factors.clone(), LargePrimes::NONE));
             }
             fits_u64 = y_.significant_bits() <= 63;
         }
@@ -143,10 +140,10 @@ pub fn factor_over_factorbase(
                 exp += 1;
             }
             if exp & 1 == 1 {
-                relation.set(i, true);
+                factors.push(i as u32);
             }
             if y_u64 == 1 {
-                return Some((relation.clone(), 1, 1));
+                return Some((factors.clone(), LargePrimes::NONE));
             }
         }
         i += 1;
@@ -154,15 +151,15 @@ pub fn factor_over_factorbase(
 
     // remainder y_u64 is 1 or prime
     if y_u64 == 1 {
-        return Some((relation.clone(), 1, 1));
+        return Some((factors.clone(), LargePrimes::NONE));
     }
     // locate prime in factorbase[i..] via binary search
     let largest_prime = *factorbase.last().unwrap() as u64;
     if y_u64 <= largest_prime
         && let Ok(offset) = factorbase[i..].binary_search(&(y_u64 as u32))
     {
-        relation.toggle(i + offset);
-        return Some((relation.clone(), 1, 1));
+        factors.push((i + offset) as u32);
+        return Some((factors.clone(), LargePrimes::NONE));
     }
     debug_assert!(Integer::from(y_u64).gcd_u(k) == 1);
     // large prime bound: largest_prime * lpm stays below 2^32, so a single large
@@ -171,7 +168,7 @@ pub fn factor_over_factorbase(
     // single large prime variation: y_u64 has no factor <= largest_prime, and
     // lp_bound < largest_prime^2, so a value below lp_bound is necessarily prime.
     if y_u64 < lp_bound {
-        return Some((relation.clone(), y_u64 as u32, 1));
+        return Some((factors.clone(), LargePrimes::one(y_u64 as u32)));
     }
     // double large prime variation: y_u64 is a product of large primes (it survived
     // trial division by the whole factor base). Accept it only if it splits into two
@@ -191,9 +188,9 @@ pub fn factor_over_factorbase(
                 // cofactor is a prime square: already a perfect square, so the large
                 // prime contributes nothing to the parity vector. This is a full
                 // relation (find_factor recovers p via the v product).
-                return Some((relation.clone(), 1, 1));
+                return Some((factors.clone(), LargePrimes::NONE));
             }
-            return Some((relation.clone(), p as u32, q as u32));
+            return Some((factors.clone(), LargePrimes::two(p as u32, q as u32)));
         }
     }
     None
@@ -243,12 +240,14 @@ mod tests {
         y: &Integer,
         factorbase: &[u32],
         large_prime_multiplier: u32,
-    ) -> Option<(FixedBitSet, u32, u32)> {
+    ) -> Option<(Vec<u32>, LargePrimes)> {
         if *y == 0 {
             return None;
         }
-        let mut relation = FixedBitSet::with_capacity(factorbase.len());
-        relation.set(0, *y < 0);
+        let mut factors = Vec::new();
+        if *y < 0 {
+            factors.push(0);
+        }
         let mut m = y.clone().abs();
         for (i, &p) in factorbase.iter().enumerate().skip(1) {
             let mut exponent = 0;
@@ -256,17 +255,19 @@ mod tests {
                 m.div_exact_u_mut(p);
                 exponent += 1;
             }
-            relation.set(i, exponent % 2 == 1);
+            if exponent % 2 == 1 {
+                factors.push(i as u32);
+            }
         }
         if m == 1 {
-            return Some((relation, 1, 1));
+            return Some((factors, LargePrimes::NONE));
         }
         // the remaining prime factors all exceed the largest factor-base prime
         let m = m.to_u64()?;
         let largest = *factorbase.last().unwrap() as u64;
         let bound = largest * large_prime_multiplier as u64;
         if m < bound {
-            return Some((relation, m as u32, 1));
+            return Some((factors, LargePrimes::one(m as u32)));
         }
         let is_prime = |x: u64| Integer::from(x).is_probably_prime(30) != rug::integer::IsPrime::No;
         if m > bound * bound || is_prime(m) {
@@ -281,9 +282,9 @@ mod tests {
             return None;
         }
         Some(if p == q {
-            (relation, 1, 1)
+            (factors, LargePrimes::NONE)
         } else {
-            (relation, p as u32, q as u32)
+            (factors, LargePrimes::two(p as u32, q as u32))
         })
     }
 
@@ -307,8 +308,7 @@ mod tests {
         let large_prime_multiplier = 40;
         let (mut u, mut y) = (Integer::new(), Integer::new());
         let mut scratch = Integer::new();
-        let mut relation_scratch = FixedBitSet::with_capacity(factorbase.len());
-        let sorted = |(relation, p, q): (FixedBitSet, u32, u32)| (relation, p.min(q), p.max(q));
+        let mut factors_scratch = Vec::new();
         // none, full, one large prime, two large primes
         let mut outcomes = [0usize; 4];
         for x in -65536..65536 {
@@ -323,17 +323,11 @@ mod tests {
                 large_prime_multiplier,
                 true,
                 &mut scratch,
-                &mut relation_scratch,
-            )
-            .map(sorted);
-            let want = brute_force_relation(&y, &factorbase, large_prime_multiplier).map(sorted);
+                &mut factors_scratch,
+            );
+            let want = brute_force_relation(&y, &factorbase, large_prime_multiplier);
             assert_eq!(got, want, "x = {x}");
-            outcomes[match want {
-                None => 0,
-                Some((_, 1, 1)) => 1,
-                Some((_, 1, _)) => 2,
-                Some(_) => 3,
-            }] += 1;
+            outcomes[want.map_or(0, |(_, large_primes)| 1 + large_primes.count())] += 1;
         }
         assert!(
             outcomes.iter().all(|&count| count > 0),

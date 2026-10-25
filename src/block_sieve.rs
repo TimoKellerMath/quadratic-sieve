@@ -162,6 +162,8 @@ pub fn sieve_over_factorbase_blocked(
     }
 
     // --- carry positions for the small primes (p <= block_size) ---
+    // two per prime; usize::MAX marks a missing root (no roots, or the second copy
+    // of a double root)
     next_pos.clear();
     for ((&p, &root1), &root2) in factorbase[ns..split]
         .iter()
