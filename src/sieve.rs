@@ -165,6 +165,8 @@ fn run_sieve_producer(
                 .saturating_sub(sum_small_logs)
                 .clamp(1, u8::MAX as u32) as u8;
             let mut i = block_start;
+            // SAFETY: AVX2 is enabled at compile time, and each load reads the 32
+            // bytes at i with i + 32 <= block_end <= total, the buffer length
             #[cfg(target_feature = "avx2")]
             unsafe {
                 use std::arch::x86_64::*;
@@ -305,8 +307,8 @@ pub fn quadratic_sieve_multithreaded(
     // add prime factors of multiplier k to factor base
     let prime_divisors_of_multiplier = SMALL_PRIMES
         .iter()
-        .filter(|p| k % *p == 0)
-        .map(|p| *p as u32);
+        .filter(|&&p| k.is_multiple_of(p))
+        .copied();
     let mut factorbase = factorbase_without_k.clone();
     factorbase.extend(prime_divisors_of_multiplier);
     factorbase.sort_unstable();
@@ -520,8 +522,8 @@ pub fn quadratic_sieve_lanczos(
     // add prime factors of multiplier k to factor base
     let prime_divisors_of_multiplier = SMALL_PRIMES
         .iter()
-        .filter(|p| k % *p == 0)
-        .map(|p| *p as u32);
+        .filter(|&&p| k.is_multiple_of(p))
+        .copied();
     let mut factorbase = factorbase_without_k.clone();
     factorbase.extend(prime_divisors_of_multiplier);
     factorbase.sort_unstable();

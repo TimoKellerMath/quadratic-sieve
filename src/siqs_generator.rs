@@ -222,9 +222,9 @@ impl<'a> SIQSPolynomialData<'a> {
         if let Ok(twice_b_inverse) = twice_b.invert(&Integer::from(p)) {
             // TODO: can this fail?
             let root1 = twice_b_inverse * c;
-            let root = p - root1.mod_u(p as u32);
+            let root = p - root1.mod_u(p);
             //println!("root = {root}, b = {b}, c = {c}, p = {p}");
-            debug_assert!((Integer::from(2) * b * root + c).is_divisible_u(p as u32));
+            debug_assert!((Integer::from(2) * b * root + c).is_divisible_u(p));
             Some(root)
         } else {
             // if poly = c (p), then either there is no zero or the polynomial is 0
@@ -244,7 +244,7 @@ impl<'a> SIQSPolynomialData<'a> {
         // compute the corresponding B[i]'s with B[i]^2 = delta_{ij} * n (mod q[j])
         self.bis.clear();
         for q in qis {
-            let a_div_q = self.q.div_exact_u_ref(*q as u32).complete();
+            let a_div_q = self.q.div_exact_u_ref(*q).complete();
             let root_q: u32 = roots[factorbase.iter().position(|&p| p == *q).unwrap()];
             let a_div_q_squared = a_div_q.square();
             let q_squared = Integer::from(*q).square();
@@ -299,11 +299,10 @@ impl<'a> SIQSPolynomialData<'a> {
         for (i, q) in qis.iter().enumerate() {
             debug_assert!(
                 (self.bis[i].clone().square() - n.clone())
-                    .is_divisible(&Integer::from(*q as u32).square())
+                    .is_divisible(&Integer::from(*q).square())
             );
             debug_assert!(
-                (self.b.clone().square() - n.clone())
-                    .is_divisible(&Integer::from(*q as u32).square())
+                (self.b.clone().square() - n.clone()).is_divisible(&Integer::from(*q).square())
             );
         }
         for (i, q) in qis.iter().enumerate() {
@@ -311,7 +310,7 @@ impl<'a> SIQSPolynomialData<'a> {
                 if i == j {
                     continue;
                 }
-                debug_assert!(b.clone().is_divisible(&Integer::from(*q as u32).square()));
+                debug_assert!(b.clone().is_divisible(&Integer::from(*q).square()));
             }
         }
         debug_assert!((self.b.clone().square() - n.clone()).is_divisible(&self.q.clone().square()));
@@ -323,12 +322,12 @@ impl<'a> SIQSPolynomialData<'a> {
             // TODO: factor out into "roots of polynomial"; update root updates!
             if let Some(ainvp) = q_inv {
                 let roots = (
-                    (ainvp.get() * (root - &self.b).complete()).mod_u(p as u32) as u32,
-                    (ainvp.get() * (-(*root as i32) - &self.b).complete()).mod_u(p as u32) as u32,
+                    (ainvp.get() * (root - &self.b).complete()).mod_u(p),
+                    (ainvp.get() * (-(*root as i32) - &self.b).complete()).mod_u(p),
                 );
                 self.roots.push(Some(roots));
-                //debug_assert!(((self.q.clone() * roots.0 + self.b.clone()).square() - n.clone()).is_divisible_u(p as u32));
-                //debug_assert!(((self.q.clone() * roots.1 + self.b.clone()).square() - n.clone()).is_divisible_u(p as u32));
+                //debug_assert!(((self.q.clone() * roots.0 + self.b.clone()).square() - n.clone()).is_divisible_u(p));
+                //debug_assert!(((self.q.clone() * roots.1 + self.b.clone()).square() - n.clone()).is_divisible_u(p));
             } else {
                 // q = 0 (mod p) => we have a linear polynomial
                 if let Some(root) = Self::root_of_linear_polynomial_mod_p(&self.b, &c, p) {
@@ -437,13 +436,13 @@ impl<'a> SIQSPolynomialData<'a> {
                     (self.a.clone() * new_roots.0 * new_roots.0
                         + 2u32 * b.clone() * new_roots.0
                         + c.clone())
-                    .is_divisible_u(p as u32)
+                    .is_divisible_u(p)
                 );
                 debug_assert!(
                     (self.a.clone() * new_roots.1 * new_roots.1
                         + 2u32 * b.clone() * new_roots.1
                         + c.clone())
-                    .is_divisible_u(p as u32)
+                    .is_divisible_u(p)
                 );
             }
         }

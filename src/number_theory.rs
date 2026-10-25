@@ -162,7 +162,7 @@ fn miller_rabin(n: u64, witnesses: &[u64]) -> bool {
         return false;
     }
     for &p in witnesses {
-        if n % p == 0 {
+        if n.is_multiple_of(p) {
             return n == p;
         }
     }
@@ -272,7 +272,7 @@ pub fn pollard_rho_u64(n: u64) -> u64 {
                 let count = BATCH.min(r - k);
                 for _ in 0..count {
                     y = f(y);
-                    let diff = if x >= y { x - y } else { y - x };
+                    let diff = x.abs_diff(y);
                     q = mont.mul(q, diff); // 0 once the cycle closes (x == y)
                 }
                 d = gcd_u64(q, n);
@@ -286,7 +286,7 @@ pub fn pollard_rho_u64(n: u64) -> u64 {
             // factor. If even that yields n, this c failed — bump it and retry.
             loop {
                 ys = f(ys);
-                let diff = if x >= ys { x - ys } else { ys - x };
+                let diff = x.abs_diff(ys);
                 d = gcd_u64(diff, n);
                 if d != 1 {
                     break;
@@ -510,7 +510,10 @@ mod tests {
         ];
         for &n in &cases {
             let d = pollard_rho_u64(n);
-            assert!(d > 1 && d < n && n % d == 0, "pollard_rho_u64({n}) = {d}");
+            assert!(
+                d > 1 && d < n && n.is_multiple_of(d),
+                "pollard_rho_u64({n}) = {d}"
+            );
         }
 
         // stress: every product of two distinct small primes. Small factors make the
@@ -525,7 +528,10 @@ mod tests {
                 }
                 let n = p as u64 * qf as u64;
                 let d = pollard_rho_u64(n);
-                assert!(d > 1 && d < n && n % d == 0, "pollard_rho_u64({n}) = {d}");
+                assert!(
+                    d > 1 && d < n && n.is_multiple_of(d),
+                    "pollard_rho_u64({n}) = {d}"
+                );
             }
         }
     }

@@ -432,9 +432,9 @@ fn invert(t: &Mat, mask: u64, left: &mut Mat, right: &mut Mat) -> u64 {
             right[cj] = 0;
         }
     }
-    for i in 0..64 {
+    for (i, r) in right.iter_mut().enumerate() {
         if (newmask >> i) & 1 == 0 {
-            right[i] = 0;
+            *r = 0;
         }
     }
     for e in right.iter_mut() {
@@ -910,7 +910,7 @@ mod tests {
             let rows: Vec<Vec<u32>> = (0..num_rows)
                 .map(|_| {
                     (0..num_columns as u32)
-                        .filter(|_| next_rand(&mut seed) % 3 == 0)
+                        .filter(|_| next_rand(&mut seed).is_multiple_of(3))
                         .collect()
                 })
                 .collect();
@@ -971,14 +971,14 @@ mod tests {
     // naive leftᵀ·right over GF(2), to validate the bit-twiddled `dot`
     fn naive_dot(left: &[u64], right: &[u64]) -> Mat {
         let mut out = [0u64; 64];
-        for i in 0..64 {
+        for (i, o) in out.iter_mut().enumerate() {
             for j in 0..64 {
                 let mut bit = 0u64;
-                for k in 0..left.len() {
-                    bit ^= ((left[k] >> i) & 1) & ((right[k] >> j) & 1);
+                for (&l, &r) in left.iter().zip(right) {
+                    bit ^= ((l >> i) & 1) & ((r >> j) & 1);
                 }
                 if bit != 0 {
-                    out[i] |= 1u64 << j;
+                    *o |= 1u64 << j;
                 }
             }
         }
@@ -991,8 +991,8 @@ mod tests {
         for (idx, &l) in left.iter().enumerate() {
             for j in 0..64 {
                 let mut bit = 0u64;
-                for b in 0..64 {
-                    bit ^= ((l >> b) & 1) & ((right[b] >> j) & 1);
+                for (b, &r) in right.iter().enumerate() {
+                    bit ^= ((l >> b) & 1) & ((r >> j) & 1);
                 }
                 if bit != 0 {
                     out[idx] |= 1u64 << j;

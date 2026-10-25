@@ -133,6 +133,11 @@ impl Relations {
     }
 
     #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.relations.is_empty()
+    }
+
+    #[inline]
     pub fn drop_last_relation(&mut self) {
         self.xsys.pop();
     }
@@ -203,15 +208,14 @@ impl LargePrimes {
 ///
 /// The single-large-prime variation is the special case where every set has one
 /// element: two partials sharing a prime immediately reduce to a full relation.
+#[derive(Default)]
 pub struct PartialRelations {
     reps: FxHashMap<u32, (FixedBitSet, Integer, Integer, LargePrimes)>,
 }
 
 impl PartialRelations {
     pub fn new() -> PartialRelations {
-        PartialRelations {
-            reps: FxHashMap::default(),
-        }
+        PartialRelations::default()
     }
 
     /// Feed a partial relation with large primes `p` and `q` (1 = none). Returns the
@@ -358,8 +362,7 @@ pub fn factor_over_factorbase(
     }
 
     // indices 2..NUM_SKIP_PRIMES: sieve skips these, so trial-divide directly
-    for i in 2..NUM_SKIP_PRIMES.min(factorbase.len()) {
-        let p = factorbase[i];
+    for (i, &p) in factorbase.iter().enumerate().take(NUM_SKIP_PRIMES).skip(2) {
         let mut exp = 0u32;
         while y_.is_divisible_u(p) {
             y_.div_exact_u_mut(p);
@@ -417,9 +420,7 @@ pub fn factor_over_factorbase(
     // is far below 2^64), so this candidate yields no usable relation. This is the
     // common case for larger N, where Q(x) is big enough that non-smooth cofactors
     // stay above 64 bits.
-    let Some(mut y_u64) = y_.to_u64() else {
-        return None;
-    };
+    let mut y_u64 = y_.to_u64()?;
     while i < factorbase.len() {
         let p = factorbase[i] as u64;
         if p * p > y_u64 {
@@ -454,11 +455,11 @@ pub fn factor_over_factorbase(
     }
     // locate prime in factorbase[i..] via binary search
     let largest_prime = *factorbase.last().unwrap() as u64;
-    if y_u64 <= largest_prime {
-        if let Ok(offset) = factorbase[i..].binary_search(&(y_u64 as u32)) {
-            relation.toggle(i + offset);
-            return Some((relation.clone(), 1, 1));
-        }
+    if y_u64 <= largest_prime
+        && let Ok(offset) = factorbase[i..].binary_search(&(y_u64 as u32))
+    {
+        relation.toggle(i + offset);
+        return Some((relation.clone(), 1, 1));
     }
     debug_assert!(Integer::from(y_u64).gcd_u(k) == 1);
     // large prime bound: largest_prime * lpm stays below 2^32, so a single large
@@ -587,8 +588,6 @@ pub fn sieve_over_factorbase_blocked(
     // reset buffer (reuse instead of reallocating)
     logs_for_polynomial.fill(0);
 
-    debug_assert!(NUM_SKIP_PRIMES >= 1);
-
     assert!(
         block_size.is_power_of_two(),
         "block size {block_size} is not a power of two"
@@ -677,6 +676,9 @@ pub fn sieve_over_factorbase_blocked(
         let mut idx = 0usize;
         for (&p, &log) in small_primes.iter().zip(small_logs) {
             let p_us = p as usize;
+            // SAFETY: next_pos holds two entries per small prime, so idx + 1 is in
+            // bounds, and every write stays below block_end <= total_len, the
+            // length of the buffer
             unsafe {
                 let pos1 = *next_pos_ptr.add(idx);
                 if pos1 != usize::MAX {
@@ -701,6 +703,7 @@ pub fn sieve_over_factorbase_blocked(
         }
         // drain the large-prime hits that fall in this block
         for &packed in buckets.block(block_idx) {
+            // SAFETY: every bucket entry holds a position below total_len
             unsafe {
                 let slot = buf_ptr.add((packed & 0x00FF_FFFF) as usize);
                 *slot = (*slot).wrapping_add((packed >> 24) as u8);
@@ -789,7 +792,7 @@ mod tests {
         let mut primes = vec![0u32, 2];
         let mut p = 3u32;
         while primes.len() < 200 {
-            if (2..p).all(|d| p % d != 0) {
+            if (2..p).all(|d| !p.is_multiple_of(d)) {
                 primes.push(p);
             }
             p += 2;
