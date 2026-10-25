@@ -534,8 +534,11 @@ pub fn sieve_over_factorbase(
             }
         }
     }
-    
-    logs[..NUM_SKIP_PRIMES].iter().map(|&l| l as u32).sum::<u32>()
+
+    logs[..NUM_SKIP_PRIMES]
+        .iter()
+        .map(|&l| l as u32)
+        .sum::<u32>()
 }
 
 /// Blocked (segmented) version of the sieve which reuses `logs_for_polynomial`

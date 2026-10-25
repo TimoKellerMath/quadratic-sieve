@@ -1,5 +1,5 @@
-use rug::Integer;
 use crate::number_theory::square_root_mod_p;
+use rug::Integer;
 
 // compute factor base for n with size size
 pub fn make_factorbase(n: &Integer, size: usize) -> Vec<u32> {

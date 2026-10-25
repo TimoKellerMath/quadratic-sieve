@@ -1,12 +1,12 @@
 use crate::constants::PREC;
 use crate::format_color::*;
-use crate::{debug_print,debug_println};
 use crate::number_theory::{lift_square_root_mod_q2, modular_inverse_u32};
 use crate::polynomial_generator::Polynomial;
+use crate::{debug_print, debug_println};
 use core::num::NonZero;
-use std::num::NonZeroU32;
 use itertools::{Itertools, izip};
 use rug::{Complete, Float, Integer};
+use std::num::NonZeroU32;
 
 #[inline]
 fn product_u32_to_integer(vector: &[u32]) -> Integer {
@@ -81,7 +81,7 @@ impl<'a> SIQSPolynomialData<'a> {
             q: Integer::from(1),
             q_inverse_mod_n: Integer::from(1),
             list_of_qis: Vec::new(),
-            num_a,                      // index of current element of list_of_qis
+            num_a,           // index of current element of list_of_qis
             bis: Vec::new(), // for i = 1..s: B[i] = a/q[i] * gamma, gamma = sqrt(n mod p) * (a/q[i])^-1 (mod q[i])
             q_inv_mod_ps: Vec::with_capacity(factorbase.len()), //  for all p \nmid a in factorbase: (a^-1 mod p)
             bainv2ips: Vec::new(), // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all p \nmid a in factorbase
@@ -283,13 +283,11 @@ impl<'a> SIQSPolynomialData<'a> {
         // compute Bainv2_{j,p} (mod p); they are used to update the roots when changing b_i to b_{i+1} in the polynomial
         self.bainv2ips.clear();
         for b in self.bis.iter() {
-            self.bainv2ips
-                .push(Vec::with_capacity(factorbase.len()));
+            self.bainv2ips.push(Vec::with_capacity(factorbase.len()));
             let bainv2ips = self.bainv2ips.last_mut().unwrap();
             for (&ainvp, &p) in izip!(&self.q_inv_mod_ps, factorbase) {
                 if let Some(ainvp) = ainvp {
-                    let bainv2jp =
-                        (b.mod_u(p) as u64 * (ainvp.get() as u64 * 2) % p as u64) as u32;
+                    let bainv2jp = (b.mod_u(p) as u64 * (ainvp.get() as u64 * 2) % p as u64) as u32;
                     bainv2ips.push(bainv2jp);
                 } else {
                     bainv2ips.push(0); // dummy: q_inv_mod_ps is None here, never read
@@ -620,8 +618,7 @@ mod tests {
         let n = p * q;
         let factorbase = make_factorbase(&n, 100);
         let roots = square_roots_mod_factorbase(&n, &factorbase);
-        let generators =
-            new_polynomial_generators(&n, 65536, 1, &factorbase, &roots, &factorbase);
+        let generators = new_polynomial_generators(&n, 65536, 1, &factorbase, &roots, &factorbase);
         let g = &generators[0];
         assert!(g.s >= 2, "need at least two q-factors, got s={}", g.s);
         assert!(

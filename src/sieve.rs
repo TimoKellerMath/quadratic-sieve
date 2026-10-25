@@ -184,7 +184,11 @@ fn run_sieve_producer(
                             let idx = i + j;
                             let x = (idx as i32) - (sieve_interval_length as i32);
                             evaluate_polynomial_at(
-                                x, &polynomial, kn, &mut u_scratch, &mut v_scratch,
+                                x,
+                                &polynomial,
+                                kn,
+                                &mut u_scratch,
+                                &mut v_scratch,
                             );
                             if let Some((relation, p, q)) = factor_over_factorbase(
                                 x,
@@ -317,7 +321,12 @@ pub fn quadratic_sieve_multithreaded(
     let n_bits = n.significant_bits();
     let use_dlp = n_bits > 250;
     println!("double large prime: {use_dlp}");
-    let lp_slack = lp_slack_bits(use_dlp, n_bits, *logs.last().unwrap() as u32, large_prime_multiplier);
+    let lp_slack = lp_slack_bits(
+        use_dlp,
+        n_bits,
+        *logs.last().unwrap() as u32,
+        large_prime_multiplier,
+    );
     println!(
         "lp slack multiplier: {:.2} ({lp_slack} bits)",
         lp_slack_multiplier(use_dlp, n_bits),
@@ -523,7 +532,12 @@ pub fn quadratic_sieve_lanczos(
     let n_bits = n.significant_bits();
     let use_dlp = n_bits > 250;
     println!("double large prime: {use_dlp}");
-    let lp_slack = lp_slack_bits(use_dlp, n_bits, *logs.last().unwrap() as u32, large_prime_multiplier);
+    let lp_slack = lp_slack_bits(
+        use_dlp,
+        n_bits,
+        *logs.last().unwrap() as u32,
+        large_prime_multiplier,
+    );
     println!(
         "lp slack multiplier: {:.2} ({lp_slack} bits)",
         lp_slack_multiplier(use_dlp, n_bits),

@@ -1,11 +1,11 @@
-pub mod relations;
-pub mod linalg;
-pub mod siqs_generator;
+pub mod constants;
+pub mod debug_print;
 pub mod factorbase;
+pub mod format_color;
+pub mod linalg;
 pub mod multiplier;
 pub mod number_theory;
 pub mod polynomial_generator;
+pub mod relations;
 pub mod sieve;
-pub mod constants;
-pub mod format_color;
-pub mod debug_print;
+pub mod siqs_generator;

@@ -3,11 +3,17 @@ use siqs::relations;
 use std::time::Instant;
 
 fn is_prime(n: u32) -> bool {
-    if n < 2 { return false; }
-    if n % 2 == 0 { return n == 2; }
+    if n < 2 {
+        return false;
+    }
+    if n % 2 == 0 {
+        return n == 2;
+    }
     let mut d = 3u32;
     while (d as u64) * (d as u64) <= n as u64 {
-        if n % d == 0 { return false; }
+        if n % d == 0 {
+            return false;
+        }
         d += 2;
     }
     true
@@ -28,7 +34,9 @@ fn generate_primes(count: usize) -> Vec<u32> {
 
 // tiny deterministic pseudo RNG
 fn next_rand(seed: &mut u64) -> u64 {
-    *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *seed = seed
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     *seed
 }
 
@@ -76,9 +84,21 @@ fn main() {
     let reciprocals = siqs::factorbase::compute_reciprocals(&factorbase);
 
     // block sizes to test
-    let block_sizes = vec![1024usize, 4096, 16384, 32768, 65536, 2 * 65536, 3 * 65536, 4 * 65536];
+    let block_sizes = vec![
+        1024usize,
+        4096,
+        16384,
+        32768,
+        65536,
+        2 * 65536,
+        3 * 65536,
+        4 * 65536,
+    ];
 
-    println!("Benchmark: sieve interval total_len = {}, primes = {}", total_len, num_primes);
+    println!(
+        "Benchmark: sieve interval total_len = {}, primes = {}",
+        total_len, num_primes
+    );
     println!("Running {} iterations per block size\n", iters);
 
     for &block_size in &block_sizes {

@@ -56,6 +56,7 @@ struct SieveParameter {
 }
 
 // from msieve -> mpqs.c
+#[rustfmt::skip]
 const SIEVE_PARAMETERS: &[SieveParameter] = &[
     SieveParameter { bits: 64,  factorbase_size: 100,    large_prime_multiplier: 40,  sieve_size: 65536       },
     SieveParameter { bits: 128, factorbase_size: 450,    large_prime_multiplier: 40,  sieve_size: 65536       },

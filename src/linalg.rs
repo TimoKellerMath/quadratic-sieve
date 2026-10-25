@@ -710,14 +710,15 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
 
     let mut deps = Vec::new();
     for s in 0..nsols as usize {
-        let dep: Vec<usize> = (0..n_r).filter(|&col| (result[col] >> s) & 1 == 1).collect();
+        let dep: Vec<usize> = (0..n_r)
+            .filter(|&col| (result[col] >> s) & 1 == 1)
+            .collect();
         if !dep.is_empty() {
             deps.push(dep);
         }
     }
     Some(deps)
 }
-
 
 /// Iteratively drop relations containing a prime that appears in exactly one
 /// surviving relation. Such a relation can never participate in a dependency — its
@@ -751,7 +752,9 @@ fn filter_singletons(rows: &[Vec<u32>], num_columns: usize) -> Vec<u32> {
             break;
         }
     }
-    (0..rows.len() as u32).filter(|&r| alive[r as usize]).collect()
+    (0..rows.len() as u32)
+        .filter(|&r| alive[r as usize])
+        .collect()
 }
 
 impl SparseRelations {
@@ -785,7 +788,10 @@ impl SparseRelations {
         // part of any dependency, and their chains are what traps the 64-wide block
         // in the isotropic radical, making Lanczos return an empty kernel.
         let keep = filter_singletons(&self.rows, self.num_columns);
-        let filtered: Vec<Vec<u32>> = keep.iter().map(|&r| self.rows[r as usize].clone()).collect();
+        let filtered: Vec<Vec<u32>> = keep
+            .iter()
+            .map(|&r| self.rows[r as usize].clone())
+            .collect();
 
         // primes that actually occur in the filtered set; rank is bounded by this, so
         // the kernel is nonzero once there are more relations than appearing primes.
@@ -1049,11 +1055,7 @@ mod tests {
         };
         for &(n_r, n_f) in &[(70usize, 50usize), (100, 70), (140, 100), (200, 150)] {
             let rows: Vec<Vec<u32>> = (0..n_r)
-                .map(|_| {
-                    (0..n_f as u32)
-                        .filter(|_| rng() % 3 == 0)
-                        .collect()
-                })
+                .map(|_| (0..n_f as u32).filter(|_| rng() % 3 == 0).collect())
                 .collect();
 
             let nullity = n_r - gf2_rank(&rows, n_f);
@@ -1099,8 +1101,7 @@ mod tests {
             let n_r = n_f + 64;
             let rows: Vec<Vec<u32>> = (0..n_r)
                 .map(|_| {
-                    let mut cols: Vec<u32> =
-                        (0..16).map(|_| (rng() % n_f as u64) as u32).collect();
+                    let mut cols: Vec<u32> = (0..16).map(|_| (rng() % n_f as u64) as u32).collect();
                     cols.sort_unstable();
                     cols.dedup();
                     cols
@@ -1108,7 +1109,10 @@ mod tests {
                 .collect();
             let deps = block_lanczos(&rows, n_f, 0xC0FFEE).unwrap_or_default();
             for dep in &deps {
-                assert!(rows_xor_to_zero(&rows, dep, n_f), "non-genuine dep at n_f={n_f}");
+                assert!(
+                    rows_xor_to_zero(&rows, dep, n_f),
+                    "non-genuine dep at n_f={n_f}"
+                );
             }
             assert!(!deps.is_empty(), "BL returned no dependencies at n_f={n_f}");
         }
@@ -1252,9 +1256,15 @@ mod tests {
                 "BL returned a non-genuine dependency at high nullity"
             );
         }
-        let dep_vectors: Vec<Vec<u32>> =
-            deps.iter().map(|d| d.iter().map(|&i| i as u32).collect()).collect();
-        assert_eq!(gf2_rank(&dep_vectors, n_r), deps.len(), "deps not independent");
+        let dep_vectors: Vec<Vec<u32>> = deps
+            .iter()
+            .map(|d| d.iter().map(|&i| i as u32).collect())
+            .collect();
+        assert_eq!(
+            gf2_rank(&dep_vectors, n_r),
+            deps.len(),
+            "deps not independent"
+        );
     }
 
     #[test]
@@ -1345,14 +1355,17 @@ mod tests {
         // remapping), and vice versa (compare via counts + genuineness).
         let deps_full = dense_left_null_space(&rows, n_f);
         let deps_filt = dense_left_null_space(&filtered, n_f);
-        assert_eq!(deps_full.len(), deps_filt.len(), "nullity changed by filtering");
+        assert_eq!(
+            deps_full.len(),
+            deps_filt.len(),
+            "nullity changed by filtering"
+        );
         for dep in &deps_filt {
             let remapped: Vec<usize> = dep.iter().map(|&i| keep[i] as usize).collect();
             assert!(rows_xor_to_zero(&rows, &remapped, n_f));
         }
         // no dependency of the original may involve a filtered-out row
-        let kept: std::collections::HashSet<usize> =
-            keep.iter().map(|&r| r as usize).collect();
+        let kept: std::collections::HashSet<usize> = keep.iter().map(|&r| r as usize).collect();
         for dep in &deps_full {
             assert!(
                 dep.iter().all(|r| kept.contains(r)),
@@ -1381,7 +1394,10 @@ mod tests {
         assert_eq!(sr.len(), n_r);
 
         let deps = sr.dependencies_lanczos(0x5161_7A9F_2C3D_4E5F, 8);
-        assert!(!deps.is_empty(), "lanczos found no dependencies on the real matrix");
+        assert!(
+            !deps.is_empty(),
+            "lanczos found no dependencies on the real matrix"
+        );
         for dep in &deps {
             assert!(
                 rows_xor_to_zero(sr.rows(), dep, n_f),

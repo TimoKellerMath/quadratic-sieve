@@ -32,10 +32,19 @@ fn synthetic(n_r: usize, appearing: usize, mut seed: u64) -> Vec<Vec<u32>> {
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("synthetic") {
-        let n_r: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(4000);
-        let n_f: usize = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(4100);
+        let n_r: usize = std::env::args()
+            .nth(2)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4000);
+        let n_f: usize = std::env::args()
+            .nth(3)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4100);
         // 4th arg = appearing columns (default n_f); n_f - appearing are padding
-        let appearing: usize = std::env::args().nth(4).and_then(|s| s.parse().ok()).unwrap_or(n_f);
+        let appearing: usize = std::env::args()
+            .nth(4)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(n_f);
         let rows = synthetic(n_r, appearing, 0x1234_5678_9ABC_DEF0);
         println!("synthetic {n_r} relations, {appearing} appearing, declared n_f={n_f}");
         for t in 0..4u64 {

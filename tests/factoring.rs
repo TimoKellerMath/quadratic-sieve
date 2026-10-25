@@ -18,8 +18,8 @@ fn semiprime(bits_p: u32, bits_q: u32) -> (Integer, Integer, Integer) {
 
 /// Assert the result is a valid non-trivial divisor of n.
 fn assert_valid_factor(n: &Integer, result: Option<Integer>) {
-    let factor =
-        result.unwrap_or_else(|| panic!("sieve found no factor for {}-bit n", n.significant_bits()));
+    let factor = result
+        .unwrap_or_else(|| panic!("sieve found no factor for {}-bit n", n.significant_bits()));
     assert!(
         factor != 1 && factor != *n,
         "trivial factor {factor} for {}-bit n",
@@ -41,8 +41,12 @@ fn check_factor(n: &Integer, num_threads: usize) {
 
 /// Factor n with the Block Lanczos solver and assert a valid divisor.
 fn check_factor_lanczos(n: &Integer, num_threads: usize) {
-    let result = quadratic_sieve_lanczos(n, num_threads)
-        .unwrap_or_else(|e| panic!("lanczos sieve errored on {}-bit n: {e}", n.significant_bits()));
+    let result = quadratic_sieve_lanczos(n, num_threads).unwrap_or_else(|e| {
+        panic!(
+            "lanczos sieve errored on {}-bit n: {e}",
+            n.significant_bits()
+        )
+    });
     assert_valid_factor(n, result);
 }
 

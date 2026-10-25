@@ -40,7 +40,7 @@ fn main() {
         .expect("No factor found.");
     let elapsed_time = now.elapsed();
     println!("factor1 = {factor} ({} ms)", elapsed_time.as_millis());*/
-        let now = Instant::now();
+    let now = Instant::now();
     let factor = quadratic_sieve_lanczos(&n, num_threads)
         .unwrap()
         .expect("No factor found.");
@@ -48,7 +48,8 @@ fn main() {
     println!("factor1 = {factor} ({} ms)", elapsed_time.as_millis());
 
     // 150 + 151 bit:
-    let n = (Integer::from(1u32) << 150i32).next_prime() * (Integer::from(1u32) << 151i32).next_prime();
+    let n =
+        (Integer::from(1u32) << 150i32).next_prime() * (Integer::from(1u32) << 151i32).next_prime();
     let num_threads = 7;
 
     let now = Instant::now();
