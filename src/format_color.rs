@@ -19,9 +19,11 @@ pub fn format_color(string: &str, index_thread: usize) -> String {
         (255, 255, 255),
         (64, 64, 64),
     ];
-    string.rgb(
-        COLOR_TABLE[index_thread % COLOR_TABLE.len()].0,
-        COLOR_TABLE[index_thread % COLOR_TABLE.len()].1,
-        COLOR_TABLE[index_thread % COLOR_TABLE.len()].2,
-    )
+    string
+        .rgb(
+            COLOR_TABLE[index_thread % COLOR_TABLE.len()].0,
+            COLOR_TABLE[index_thread % COLOR_TABLE.len()].1,
+            COLOR_TABLE[index_thread % COLOR_TABLE.len()].2,
+        )
+        .into()
 }

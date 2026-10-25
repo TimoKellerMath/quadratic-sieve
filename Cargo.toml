@@ -2,6 +2,7 @@
 name = "siqs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.99"
 license = "BSD-3-Clause"
 
 [profile.release]
@@ -22,17 +23,17 @@ codegen-units = 16
 
 [dependencies]
 fixedbitset = "0.5"
-colored_text = "0.3"
-itertools = "0.14"
+colored_text = "0.6"
+itertools = "0.15"
 rustc-hash = "2.1"
 rayon = "1.12"
 
 [dependencies.gmp-mpfr-sys]
-version = "1.6"
+version = "1.7"
 default-features = false
 features = ["use-system-libs"]
 
 [dependencies.rug]
-version = "1.28"
+version = "1.30"
 default-features = false
 features = ["integer", "std"]
