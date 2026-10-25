@@ -6,13 +6,9 @@ use rug::integer::IsPrime;
 use rug::{Complete, Integer};
 //use rug::ops::DivRounding;
 
-// TODO: use rug's Error
 #[derive(Debug, Clone)]
 pub enum NumberTheoryError {
-    //IsZero,
-    //IsNotPositive(Integer),
     IsEven(Integer),
-    //NotPrime(Integer),
     NotCoprime(Integer, Integer),
     IsNonsquare(Integer, Integer),
     AlgorithmFailed,
@@ -21,10 +17,7 @@ pub enum NumberTheoryError {
 impl fmt::Display for NumberTheoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            //NumberTheoryError::IsZero => write!(f, "is zero"),
-            //NumberTheoryError::IsNotPositive(a) => write!(f, "{a} < 0"),
             NumberTheoryError::IsEven(a) => write!(f, "{a} is even"),
-            //NumberTheoryError::NotPrime(a) => write!(f, "{a} not prime"),
             NumberTheoryError::NotCoprime(a, b) => write!(f, "gcd({a}, {b}) != 1"),
             NumberTheoryError::IsNonsquare(a, p) => write!(f, "{a} not a square mod {p}"),
             NumberTheoryError::AlgorithmFailed => write!(f, "algorithm failed"),
@@ -32,13 +25,7 @@ impl fmt::Display for NumberTheoryError {
     }
 }
 
-/* https://doc.rust-lang.org/rust-by-example/error/multiple_error_types/wrap_error.html
-cast error
-impl std::error::Error for NumberTheoryError {
-    fn description(&self) -> &str {
-        self.fmt(f)
-    }
-}*/
+impl std::error::Error for NumberTheoryError {}
 
 // all primes <= 1000
 pub const SMALL_PRIMES: [u32; 168] = [

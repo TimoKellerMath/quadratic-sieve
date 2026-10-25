@@ -40,6 +40,7 @@ pub struct SIQSPolynomialData<'a> {
     q: Integer,
     q_inverse_mod_n: Integer,
     b: Integer, // the b for j
+    c: Integer, // (b^2 - n)/a for the first b of the current a
 
     n: &'a Integer,
     factorbase: &'a [u32],
@@ -84,6 +85,7 @@ impl<'a> SIQSPolynomialData<'a> {
             bainv2ips: Vec::new(), // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all p \nmid a in factorbase
             a: Integer::from(0),
             b: Integer::from(0), // the b for j,
+            c: Integer::from(0),
             roots: Roots::default(),
             n,
             factorbase,
@@ -249,7 +251,7 @@ impl<'a> SIQSPolynomialData<'a> {
             let a_div_q_squared = a_div_q.square();
             let q_squared = Integer::from(*q).square();
             let root_mod_q_squared =
-                lift_square_root_mod_q2(n, &Integer::from(root_q), &q_squared).unwrap(); // TODO: cache this!
+                lift_square_root_mod_q2(n, &Integer::from(root_q), &Integer::from(*q)).unwrap();
             let mut gamma = ((root_mod_q_squared
                 * a_div_q_squared.invert_ref(&q_squared).unwrap().complete())
                 % q_squared.clone())
@@ -293,7 +295,7 @@ impl<'a> SIQSPolynomialData<'a> {
 
         // compute b
         self.b = self.bis.iter().sum();
-        let c = (self.b.square_ref().complete() - n).div_exact(&self.a); // TODO: store in self.c
+        self.c = (self.b.square_ref().complete() - n).div_exact(&self.a);
 
         // DEBUG: test B[i]
         for (i, q) in qis.iter().enumerate() {
@@ -330,7 +332,7 @@ impl<'a> SIQSPolynomialData<'a> {
                 //debug_assert!(((self.q.clone() * roots.1 + self.b.clone()).square() - n.clone()).is_divisible_u(p));
             } else {
                 // q = 0 (mod p) => we have a linear polynomial
-                if let Some(root) = Self::root_of_linear_polynomial_mod_p(&self.b, &c, p) {
+                if let Some(root) = Self::root_of_linear_polynomial_mod_p(&self.b, &self.c, p) {
                     self.roots.push(Some((root, root)));
                 }
                 //else if c.is_divisible_u(p)
@@ -350,7 +352,7 @@ impl<'a> SIQSPolynomialData<'a> {
         if self.j == 0 {
             self.j += 1;
             let b = self.b.clone();
-            let c = (b.square_ref().complete() - self.n).div_exact(&self.a);
+            let c = self.c.clone();
             debug_assert_eq!(b.clone().square() - self.a.clone() * c.clone(), *self.n);
             return (
                 Polynomial {
@@ -377,7 +379,7 @@ impl<'a> SIQSPolynomialData<'a> {
             }
             self.precompute_polynomial_data_for_q(self.n, self.factorbase, self.n_roots);
             let b = self.b.clone();
-            let c = (b.square_ref().complete() - self.n).div_exact(&self.a);
+            let c = self.c.clone();
             debug_assert_eq!(b.clone().square() - self.a.clone() * c.clone(), *self.n);
             self.j = 1;
             return (
@@ -521,8 +523,13 @@ pub fn new_polynomial_generators<'a>(
     let num_thread_factors = (1u32..)
         .find(|k| Integer::from(2 * *k).binomial(*k) >= num_threads)
         .unwrap() as usize;
-    //let num_thread_factors = 2_usize;
-    let start_index_thread_factors = 4_usize; // TODO: should fit into factorbase, but otherwise, our number is too small
+    // the thread-specific factors start at the fifth prime, which every factor base
+    // from the parameter table (at least 100 primes) leaves room for
+    let start_index_thread_factors = 4;
+    assert!(
+        prime_factors_for_q.len() >= start_index_thread_factors + num_thread_factors,
+        "factor base too small for {num_threads} threads"
+    );
     // for each thread: compute machine specific divisors
     assert!(
         Integer::from(2 * num_thread_factors)
@@ -534,20 +541,11 @@ pub fn new_polynomial_generators<'a>(
     let combinations = prime_factors_for_q
         .iter()
         .skip(start_index_thread_factors)
-        //.chunks(num_thread_factors);
         .combinations(num_thread_factors);
-    /*let factors = prime_factors_for_q
-    .iter()
-    .skip(start_index_thread_factors);*/
     let mut thread_polynomial_data = Vec::<SIQSPolynomialData>::with_capacity(num_threads);
     for (thread_number, combination) in combinations.into_iter().enumerate().take(num_threads) {
-        //let mut index_larger_factor = start_index_thread_factors + 2 * num_threads;
-        //for (thread_number, smaller_factor) in factors.enumerate().take(num_threads) {
         // ensures that two different threads differ in at least one thread specific factor
         let thread_specific_factors: Vec<u32> = combination.into_iter().copied().collect();
-        //let thread_specific_factors: Vec<u32> = vec![*smaller_factor, prime_factors_for_q[index_larger_factor]];
-        //println!("{thread_specific_factors:?}");
-        //index_larger_factor -= 1;
         // for each thread: run initialize_new_set_of_polynomials
         thread_polynomial_data.push(SIQSPolynomialData::initialize_new_set_of_polynomials(
             &thread_specific_factors,
