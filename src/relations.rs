@@ -379,11 +379,12 @@ pub fn factor_over_factorbase(
     let x_neg = x < 0;
     // indices NUM_SKIP_PRIMES..: sieved primes. p | Q(x) iff x ≡ root1 or root2 (mod p),
     // so skip the big-int divisibility test for primes that don't hit x.
+    // Switch to u64 arithmetic once the cofactor fits in 63 bits. Its size only
+    // changes when a prime divides it, so check it only then: significant_bits is
+    // a GMP call, too slow to make for every prime.
     let mut i = NUM_SKIP_PRIMES;
-    while i < factorbase.len() {
-        if y_.significant_bits() <= 63 {
-            break;
-        }
+    let mut fits_u64 = y_.significant_bits() <= 63;
+    while !fits_u64 && i < factorbase.len() {
         let p = factorbase[i];
         let divides = match roots[i] {
             Some((r1, r2)) => {
@@ -404,6 +405,7 @@ pub fn factor_over_factorbase(
             if *y_ == 1 {
                 return Some((relation.clone(), 1, 1));
             }
+            fits_u64 = y_.significant_bits() <= 63;
         }
         i += 1;
     }
