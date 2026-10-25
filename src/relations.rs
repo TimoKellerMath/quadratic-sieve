@@ -869,4 +869,232 @@ mod tests {
             }
         }
     }
+
+    // a relation over `len` columns with the given bits set
+    fn bits(ones: &[usize], len: usize) -> FixedBitSet {
+        let mut relation = FixedBitSet::with_capacity(len);
+        for &i in ones {
+            relation.insert(i);
+        }
+        relation
+    }
+
+    // an n of about 100 bits, whose polynomials yield every kind of relation
+    fn example_n() -> Integer {
+        let p = ((Integer::from(1) << 49u32) + 12345u32).next_prime();
+        let q = ((Integer::from(1) << 50u32) + 67890u32).next_prime();
+        p * q
+    }
+
+    // The relation of y over the factor base by trial division with every prime,
+    // classified independently of factor_over_factorbase: full, one large prime
+    // below the bound, or two large primes below it (split by trial division).
+    fn brute_force_relation(
+        y: &Integer,
+        factorbase: &[u32],
+        large_prime_multiplier: u32,
+    ) -> Option<(FixedBitSet, u32, u32)> {
+        if *y == 0 {
+            return None;
+        }
+        let mut relation = FixedBitSet::with_capacity(factorbase.len());
+        relation.set(0, *y < 0);
+        let mut m = y.clone().abs();
+        for (i, &p) in factorbase.iter().enumerate().skip(1) {
+            let mut exponent = 0;
+            while m.is_divisible_u(p) {
+                m.div_exact_u_mut(p);
+                exponent += 1;
+            }
+            relation.set(i, exponent % 2 == 1);
+        }
+        if m == 1 {
+            return Some((relation, 1, 1));
+        }
+        // the remaining prime factors all exceed the largest factor-base prime
+        let m = m.to_u64()?;
+        let largest = *factorbase.last().unwrap() as u64;
+        let bound = largest * large_prime_multiplier as u64;
+        if m < bound {
+            return Some((relation, m as u32, 1));
+        }
+        let is_prime = |x: u64| Integer::from(x).is_probably_prime(30) != rug::integer::IsPrime::No;
+        if m > bound * bound || is_prime(m) {
+            return None;
+        }
+        let mut p = (largest + 1) | 1;
+        while m % p != 0 {
+            p += 2;
+        }
+        let q = m / p;
+        if q > bound || !is_prime(q) {
+            return None;
+        }
+        Some(if p == q {
+            (relation, 1, 1)
+        } else {
+            (relation, p as u32, q as u32)
+        })
+    }
+
+    // At every position of the interval, factor_over_factorbase finds the same
+    // relation as brute force, and every kind of outcome occurs.
+    #[test]
+    fn trial_division_matches_brute_force() {
+        let n = example_n();
+        let factorbase = crate::factorbase::make_factorbase(&n, 300);
+        let n_roots = crate::factorbase::square_roots_mod_factorbase(&n, &factorbase);
+        let reciprocals = crate::factorbase::compute_reciprocals(&factorbase);
+        let mut generators = crate::siqs_generator::new_polynomial_generators(
+            &n,
+            65536,
+            1,
+            &factorbase,
+            &n_roots,
+            &factorbase,
+        );
+        let (polynomial, roots) = generators[0].next_polynomial();
+        let large_prime_multiplier = 40;
+        let (mut u, mut y) = (Integer::new(), Integer::new());
+        let mut scratch = Integer::new();
+        let mut relation_scratch = FixedBitSet::with_capacity(factorbase.len());
+        let sorted = |(relation, p, q): (FixedBitSet, u32, u32)| (relation, p.min(q), p.max(q));
+        // none, full, one large prime, two large primes
+        let mut outcomes = [0usize; 4];
+        for x in -65536..65536 {
+            evaluate_polynomial_at(x, &polynomial, &n, &mut u, &mut y);
+            let got = factor_over_factorbase(
+                x,
+                &y,
+                &factorbase,
+                roots,
+                &reciprocals,
+                1,
+                large_prime_multiplier,
+                true,
+                &mut scratch,
+                &mut relation_scratch,
+            )
+            .map(sorted);
+            let want = brute_force_relation(&y, &factorbase, large_prime_multiplier).map(sorted);
+            assert_eq!(got, want, "x = {x}");
+            outcomes[match want {
+                None => 0,
+                Some((_, 1, 1)) => 1,
+                Some((_, 1, _)) => 2,
+                Some(_) => 3,
+            }] += 1;
+        }
+        assert!(
+            outcomes.iter().all(|&count| count > 0),
+            "outcomes (none, full, 1LP, 2LP): {outcomes:?}"
+        );
+    }
+
+    // a·Q(x) = (a x + b)^2 - n and u^2 ≡ Q(x) (mod n)
+    #[test]
+    fn evaluation_gives_a_congruence_of_squares() {
+        let n = example_n();
+        let factorbase = crate::factorbase::make_factorbase(&n, 300);
+        let n_roots = crate::factorbase::square_roots_mod_factorbase(&n, &factorbase);
+        let mut generators = crate::siqs_generator::new_polynomial_generators(
+            &n,
+            65536,
+            1,
+            &factorbase,
+            &n_roots,
+            &factorbase,
+        );
+        let (polynomial, _) = generators[0].next_polynomial();
+        let (mut u, mut y) = (Integer::new(), Integer::new());
+        for x in [-65536, -1000, -1, 0, 1, 777, 65535] {
+            evaluate_polynomial_at(x, &polynomial, &n, &mut u, &mut y);
+            let ax_b = polynomial.a.clone() * x + &polynomial.b;
+            assert_eq!(polynomial.a.clone() * &y, ax_b.square() - &n, "x = {x}");
+            assert!((u.clone().square() - &y).is_divisible(&n), "x = {x}");
+        }
+    }
+
+    #[test]
+    fn large_prime_sets_cancel_shared_primes() {
+        let set = LargePrimes::new;
+        let elements = |primes: LargePrimes| (primes.a, primes.b);
+        assert_eq!(elements(set(7, 1).symmetric_difference(set(7, 1))), (1, 1));
+        assert_eq!(elements(set(3, 7).symmetric_difference(set(7, 1))), (1, 3));
+        assert_eq!(elements(set(7, 3).symmetric_difference(set(5, 7))), (3, 5));
+        assert_eq!(elements(set(1, 1).symmetric_difference(set(5, 1))), (1, 5));
+    }
+
+    // Partials with the large primes {11}, {11, 13} and {13} form a cycle; the
+    // third completes a full relation combining all three.
+    #[test]
+    fn partials_on_a_cycle_combine_into_a_full_relation() {
+        let mut partials = PartialRelations::new();
+        let a = (bits(&[0, 2], 8), Integer::from(3), Integer::from(5));
+        let b = (bits(&[2, 4], 8), Integer::from(7), Integer::from(9));
+        let c = (bits(&[4, 5], 8), Integer::from(11), Integer::from(13));
+        assert!(partials.add(a.0.clone(), a.1, a.2, 11, 1).is_none());
+        assert!(partials.add(b.0.clone(), b.1, b.2, 11, 13).is_none());
+        let (relation, u, v) = partials.add(c.0.clone(), c.1, c.2, 13, 1).unwrap();
+        let mut expected = a.0;
+        expected ^= &b.0;
+        expected ^= &c.0;
+        assert_eq!(relation, expected);
+        assert_eq!(u, 3 * 7 * 11);
+        assert_eq!(v, 5 * 9 * 13);
+    }
+
+    // With single large primes only, the cycle graph combines exactly like the
+    // plain hash map.
+    #[test]
+    fn single_and_double_large_prime_storage_agree_on_single_primes() {
+        let mut single = PartialStore::new(false);
+        let mut double = PartialStore::new(true);
+        let mut combined = 0;
+        for (i, &p) in [11u32, 13, 11, 17, 13, 11, 19].iter().enumerate() {
+            let relation = bits(&[i % 8], 8);
+            let (u, v) = (Integer::from(2 * i + 3), Integer::from(2 * i + 5));
+            let from_single = single.add(relation.clone(), u.clone(), v.clone(), p, 1);
+            let from_double = double.add(relation, u, v, p, 1);
+            assert_eq!(from_single, from_double, "partial {i} with large prime {p}");
+            combined += from_single.is_some() as usize;
+        }
+        assert_eq!(combined, 3);
+    }
+
+    // 90^2 - 8051 = 7^2: one relation with a square v and an empty parity vector
+    // is a dependency on its own, and gives 8051 = 83 · 97.
+    #[test]
+    fn gaussian_elimination_and_find_factor_on_a_tiny_example() {
+        let n = Integer::from(8051);
+        let mut relations = Relations::new(4);
+        relations.add_relation(bits(&[], 4), (Integer::from(90), Integer::from(49)));
+        let dependency = relations.gaussian_elimination().expect("a zero row");
+        assert_eq!(dependency.ones().collect::<Vec<_>>(), vec![0]);
+        let factor = relations.find_factor(&dependency, &n).expect("a factor");
+        assert!(factor == 83 || factor == 97, "factor {factor}");
+    }
+
+    // Over 3 columns, the 4th relation is always dependent; its index 3 used to
+    // overflow the index bitsets (3d42e99).
+    #[test]
+    fn gaussian_elimination_at_full_rank() {
+        let rows = [
+            bits(&[0], 3),
+            bits(&[1], 3),
+            bits(&[2], 3),
+            bits(&[0, 1], 3),
+        ];
+        let mut relations = Relations::new(3);
+        for (i, row) in rows.iter().enumerate() {
+            relations.add_relation(row.clone(), (Integer::from(1), Integer::from(1)));
+            let dependency = relations.gaussian_elimination();
+            if i < 3 {
+                assert!(dependency.is_none(), "row {i} is independent");
+            } else {
+                let dependency = dependency.expect("4 rows over 3 columns are dependent");
+                assert_eq!(dependency.ones().collect::<Vec<_>>(), vec![0, 1, 3]);
+            }
+        }
+    }
 }
