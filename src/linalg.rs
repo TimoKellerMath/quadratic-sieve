@@ -200,6 +200,8 @@ pub fn dense_left_null_space(rows: &[Vec<u32>], num_columns: usize) -> Vec<Vec<u
 // of the dense O(R²·F/64). Ported from the reference implementation at
 // github.com/SebWouters/blanczos (the recurrence and the selection/`invert` step in
 // particular are transcribed directly to avoid sign mistakes).
+// That code is Copyright (c) 2020, Sebastian Wouters, under the BSD 3-Clause
+// License; see LICENSE.
 //
 // Orientation: the matrix is B with `num_columns` rows (primes) and `R = rows.len()`
 // columns (relations). `mul_regular` applies B (relations -> primes), `mul_transpose`
