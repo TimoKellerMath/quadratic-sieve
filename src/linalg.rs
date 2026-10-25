@@ -8,6 +8,7 @@
 //! the production solver.
 
 use fixedbitset::FixedBitSet;
+use log::{info, warn};
 use rayon::prelude::*;
 use rug::Integer;
 
@@ -776,7 +777,7 @@ impl SparseRelations {
                 // success: a nonempty kernel was found
                 Some(deps) if !deps.is_empty() => {
                     if t > 0 {
-                        eprintln!("[lanczos] succeeded on attempt {}/{TRIES}", t + 1);
+                        info!("Block Lanczos succeeded on attempt {}/{TRIES}", t + 1);
                     }
                     return remap(deps);
                 }
@@ -791,8 +792,8 @@ impl SparseRelations {
         // every attempt failed though a kernel must exist. The dense solver is exact
         // but sequential O(R·F·(R+F)/64) — minutes at scale — so warn loudly and (when
         // SIQS_DUMP_MATRIX is set) dump the matrix so the failure can be reproduced.
-        eprintln!(
-            "[lanczos] all {TRIES} attempts failed on a {}×{} matrix \
+        warn!(
+            "Block Lanczos failed in all {TRIES} attempts on a {}×{} matrix \
              ({breakdowns} breakdowns, {empties} empty); falling back to the SERIAL \
              dense solver — this is single-threaded and may take many minutes",
             filtered.len(),

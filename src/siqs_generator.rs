@@ -1,9 +1,8 @@
-use crate::format_color::*;
 use crate::number_theory::{lift_square_root_mod_q2, modular_inverse_u32};
 use crate::polynomial_generator::{Polynomial, Roots};
-use crate::{debug_print, debug_println};
 use core::num::NonZero;
 use itertools::Itertools;
+use log::{debug, trace};
 use rug::{Complete, Integer};
 use std::num::NonZeroU32;
 
@@ -96,13 +95,12 @@ impl<'a> SIQSPolynomialData<'a> {
         };
         polynomial_data.compute_list_of_factors_of_q(total_q_size, prime_factors_for_q);
         polynomial_data.precompute_polynomial_data_for_q(n, factorbase, roots);
-        debug_println!(
+        debug!(
             "thread #{thread_number}: {} + {} = {} factors",
             thread_specific_factors.len(),
             polynomial_data.s,
             polynomial_data.num_factors
         );
-        //print!("{}", format_color(format!("thread #{thread_number}: {} + {} = {} factors", thread_specific_factors.len(), polynomial_data.s, polynomial_data.num_factors), self.thread_number));
         polynomial_data
     }
 
@@ -212,7 +210,11 @@ impl<'a> SIQSPolynomialData<'a> {
             //println!("quality: {quality}");
             self.list_of_qis.push(new_qis);
         }
-        debug_println!("{} q's", self.list_of_qis.len());
+        debug!(
+            "thread #{}: {} q's",
+            self.thread_number,
+            self.list_of_qis.len()
+        );
     }
 
     // The root of the sieving polynomial modulo a prime p | a, where it is linear:
@@ -254,7 +256,7 @@ impl<'a> SIQSPolynomialData<'a> {
     }
 
     fn precompute_polynomial_data_for_q(&mut self, n: &Integer, factorbase: &[u32], roots: &[u32]) {
-        debug_print!("{}", format_color("|", self.thread_number));
+        trace!("thread #{}: next a", self.thread_number);
         // use up the next a of the list
         let qis = &self.list_of_qis[self.num_a];
         self.num_a += 1;

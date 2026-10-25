@@ -6,6 +6,7 @@
 // `cargo test --release -- --ignored`.
 
 use rug::Integer;
+use siqs::number_theory::NumberTheoryError;
 use siqs::sieve::quadratic_sieve_lanczos;
 
 /// Deterministic semiprime n = p*q with p ~ 2^bits_p, q ~ 2^bits_q.
@@ -37,6 +38,42 @@ fn check_factor(n: &Integer, num_threads: usize) {
     let result = quadratic_sieve_lanczos(n, num_threads)
         .unwrap_or_else(|e| panic!("sieve errored on {}-bit n: {e}", n.significant_bits()));
     assert_valid_factor(n, result);
+}
+
+// Small prime factors and the roots of perfect powers come back without sieving.
+#[test]
+fn small_factors_and_perfect_powers_need_no_sieve() {
+    let factor = |n: Integer| quadratic_sieve_lanczos(&n, 1).unwrap();
+    let p = (Integer::from(1) << 40u32).next_prime();
+    let q = (Integer::from(1) << 41u32).next_prime();
+    assert_eq!(factor(Integer::from(6)), Some(Integer::from(2)));
+    assert_eq!(factor(p.clone() * 997u32), Some(Integer::from(997)));
+    assert_eq!(factor(p.clone().square()), Some(p.clone()));
+    assert_eq!(factor(p.clone().square() * &p), Some(p.clone()));
+    assert_eq!(factor((p.clone() * &q).square()), Some(p * q));
+}
+
+#[test]
+fn primes_and_numbers_below_two_are_errors() {
+    let large_prime = (Integer::from(1) << 100u32).next_prime();
+    for n in [-15, 0, 1, 2, 997]
+        .map(Integer::from)
+        .into_iter()
+        .chain([large_prime])
+    {
+        let result = quadratic_sieve_lanczos(&n, 1);
+        assert!(
+            matches!(result, Err(NumberTheoryError::NotComposite(ref m)) if *m == n),
+            "n = {n}: {result:?}"
+        );
+    }
+}
+
+// zero sieving threads count as one
+#[test]
+fn factors_with_zero_threads() {
+    let (n, _, _) = semiprime(32, 32);
+    check_factor(&n, 0);
 }
 
 #[test]

@@ -44,12 +44,14 @@ let num_threads = 7; // sieving threads
 let factor: Option<Integer> = quadratic_sieve_lanczos(&n, num_threads).unwrap();
 ```
 
-The library prints its progress to stdout. It collects relations until it has
-192 more than the number of primes that appear, then runs Block Lanczos.
+It collects relations until it has 192 more than the number of primes that
+appear, then runs Block Lanczos. A prime factor of `n` below 1000, or the root
+`m` of a perfect power `n = m^k`, is returned without sieving; for primes and
+`n < 2` the result is an error.
 
-`n` must not have prime factors below 1000 (an error is returned otherwise),
-and it is not checked for primality or perfect powers, so remove small factors
-and test for primality first.
+The library logs its progress with the [`log`](https://docs.rs/log) crate, so
+it prints nothing unless the program sets up a logger; `src/main.rs` has a
+minimal one that prints to stdout.
 
 ### Environment variables
 
@@ -60,6 +62,7 @@ and test for primality first.
 | `SIQS_PROFILE` | Print per-phase timings of the first sieving thread to stderr every 2000 polynomials. |
 | `SIQS_DUMP_MATRIX=path` | Write the relation matrix to `path` if Block Lanczos fails. |
 | `SIQS_BL_DEBUG` | Print the rank Block Lanczos finds. |
+| `SIQS_LOG` | Log level of `main`: `error`, `warn`, `info` (default), `debug` or `trace`. |
 
 ### Other binaries
 

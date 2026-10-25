@@ -28,10 +28,10 @@ opt-level = 3
 
 [dependencies]
 fixedbitset = "0.5"
-colored_text = "0.6"
 itertools = "0.15"
 rustc-hash = "2.1"
 rayon = "1.12"
+log = "0.4"
 
 [dependencies.gmp-mpfr-sys]
 version = "1.7"

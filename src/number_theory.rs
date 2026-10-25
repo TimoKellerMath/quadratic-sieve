@@ -12,6 +12,8 @@ pub enum NumberTheoryError {
     NotCoprime(Integer, Integer),
     IsNonsquare(Integer, Integer),
     AlgorithmFailed,
+    /// A prime, or a number below 2, given to be factored.
+    NotComposite(Integer),
 }
 
 impl fmt::Display for NumberTheoryError {
@@ -21,6 +23,7 @@ impl fmt::Display for NumberTheoryError {
             NumberTheoryError::NotCoprime(a, b) => write!(f, "gcd({a}, {b}) != 1"),
             NumberTheoryError::IsNonsquare(a, p) => write!(f, "{a} not a square mod {p}"),
             NumberTheoryError::AlgorithmFailed => write!(f, "algorithm failed"),
+            NumberTheoryError::NotComposite(a) => write!(f, "{a} is not composite"),
         }
     }
 }

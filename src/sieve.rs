@@ -1,17 +1,16 @@
-use std::io::{self, Write};
 use std::sync::atomic::Ordering;
 use std::sync::{OnceLock, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use rug::Integer;
+use log::{info, trace, warn};
+use rug::integer::IsPrime;
+use rug::{Complete, Integer};
 
 use crate::block_sieve::{
     SIEVE_CALLS, SIEVE_LOOP_NANOS, SIEVE_SETUP_NANOS, SieveScratch, sieve_over_factorbase_blocked,
 };
-use crate::debug_print;
 use crate::factorbase::*;
-use crate::format_color::format_color;
 use crate::large_primes::PartialStore;
 use crate::linalg::*;
 use crate::multiplier::*;
@@ -95,13 +94,13 @@ struct SieveParams {
 impl SieveParams {
     fn new(n: &Integer) -> Result<SieveParams, NumberTheoryError> {
         let k = compute_multiplier(n)?;
-        println!("k = {k}");
+        info!("k = {k}");
         let kn: Integer = n.clone() * k;
         // heuristic value for the factor base
         let log2_kn = (kn.significant_bits() + 1) as usize;
         let (factorbase_size, sieve_interval_length, large_prime_multiplier) =
             compute_sieve_parameters(log2_kn);
-        println!("factor base size: {factorbase_size}");
+        info!("factor base size: {factorbase_size}");
         let factorbase_without_k = make_factorbase(&kn, factorbase_size);
         // add prime factors of multiplier k to factor base
         let prime_divisors_of_multiplier = SMALL_PRIMES
@@ -121,14 +120,14 @@ impl SieveParams {
         // primality test / Pollard-rho split and the larger partial-relation graph.
         let n_bits = n.significant_bits();
         let use_dlp = n_bits > 250;
-        println!("double large prime: {use_dlp}");
+        info!("double large prime: {use_dlp}");
         let lp_slack = lp_slack_bits(
             use_dlp,
             n_bits,
             *logs.last().unwrap() as u32,
             large_prime_multiplier,
         );
-        println!(
+        info!(
             "lp slack multiplier: {:.2} ({lp_slack} bits)",
             lp_slack_multiplier(use_dlp, n_bits),
         );
@@ -203,7 +202,7 @@ fn run_sieve_producer(
     'outer_loop: loop {
         let prof_t0 = Instant::now();
         let (polynomial, roots) = polynomial_generator.next_polynomial();
-        debug_print!("{}", format_color("?", index_thread));
+        trace!("thread {index_thread}: next polynomial");
         const BLOCK_SIZE: usize = 2 * 65536;
         let prof_t1 = Instant::now();
         let sum_small_logs = sieve_over_factorbase_blocked(
@@ -347,14 +346,19 @@ fn find_candidates_scalar(logs: &[u8], threshold: u8, offset: usize, candidates:
 /// behind.
 const CHANNEL_CAPACITY: usize = 1024;
 
-/// Factors n with the self-initializing quadratic sieve. Returns a factor, or `None`
-/// if no dependency gives one.
+/// Factors n with the self-initializing quadratic sieve. Returns a nontrivial factor,
+/// or `None` if no dependency gives one.
 ///
-/// `num_threads` threads sieve and send their relations to the calling thread,
-/// which combines the partial ones and collects the full ones until there are 192
-/// more than primes appearing in them. Then Block Lanczos
+/// Inputs that need no sieve come first: a prime factor below 1000, or the root m of
+/// a perfect power n = m^k, is returned right away, and primes and n < 2 give
+/// [`NumberTheoryError::NotComposite`].
+///
+/// `num_threads` threads (at least one) sieve and send their relations to the
+/// calling thread, which combines the partial ones and collects the full ones until
+/// there are 192 more than primes appearing in them. Then Block Lanczos
 /// ([`SparseRelations::dependencies_lanczos`]) finds dependencies, on
-/// `num_threads + 1` threads, and each is tried until one gives a factor.
+/// `num_threads + 1` threads, and each is tried until one gives a factor. The
+/// progress is logged with the `log` crate.
 pub fn quadratic_sieve_lanczos(
     n: &Integer,
     num_threads: usize,
@@ -362,6 +366,10 @@ pub fn quadratic_sieve_lanczos(
     // fixed seed for the randomized starting block, for reproducible runs
     const LANCZOS_SEED: u64 = 0x5161_7A9F_2C3D_4E5F;
 
+    if let Some(factor) = factor_without_sieve(n)? {
+        return Ok(Some(factor));
+    }
+    let num_threads = num_threads.max(1);
     let params = SieveParams::new(n)?;
     let mut polynomial_generators = params.polynomial_generators(num_threads);
     let relations = thread::scope(|s| {
@@ -379,7 +387,7 @@ pub fn quadratic_sieve_lanczos(
     });
     let lanczos_start = Instant::now();
     let dependencies = relations.dependencies_lanczos(LANCZOS_SEED, num_threads + 1);
-    println!(
+    info!(
         "Block Lanczos on {} threads returned {} dependencies in {:.2?}",
         num_threads + 1,
         dependencies.len(),
@@ -389,11 +397,38 @@ pub fn quadratic_sieve_lanczos(
         .iter()
         .find_map(|dependency| relations.find_factor(dependency, n));
     match &factor {
-        Some(factor) => println!("found factor: {factor}"),
-        None => println!("no factor found among the dependencies"),
+        Some(factor) => info!("found factor: {factor}"),
+        None => warn!("no factor found among the dependencies"),
     }
-    io::stdout().flush().unwrap();
     Ok(factor)
+}
+
+/// A factor of n found without the sieve: a prime factor below 1000, or the root m
+/// of a perfect power n = m^k. An error if n is prime or less than 2.
+fn factor_without_sieve(n: &Integer) -> Result<Option<Integer>, NumberTheoryError> {
+    if *n < 2 {
+        return Err(NumberTheoryError::NotComposite(n.clone()));
+    }
+    for p in SMALL_PRIMES {
+        if n.is_divisible_u(p) {
+            return if *n == p {
+                Err(NumberTheoryError::NotComposite(n.clone()))
+            } else {
+                Ok(Some(Integer::from(p)))
+            };
+        }
+    }
+    // the sieve finds only trivial factors of a prime power
+    if n.is_perfect_power() {
+        return Ok((2..).find_map(|k| {
+            let (root, remainder) = n.root_rem_ref(k).complete();
+            (remainder == 0).then_some(root)
+        }));
+    }
+    if n.is_probably_prime(30) != IsPrime::No {
+        return Err(NumberTheoryError::NotComposite(n.clone()));
+    }
+    Ok(None)
 }
 
 /// Receives the relations of the sieving threads and combines the partial ones,
@@ -427,8 +462,6 @@ fn collect_relations(
     let max_relations = factorbase_size + RELATION_SURPLUS;
     let progress_step = (max_relations / 10).max(1);
     let collection_start = Instant::now();
-    // time each 10% step so slow ones can be flagged
-    let mut last_step_time = collection_start;
 
     while sparse.len() < appeared_count + RELATION_SURPLUS {
         // The sieving threads never exit on their own, so a closed channel can only
@@ -440,13 +473,13 @@ fn collect_relations(
         // primes) are routed through the partial-relation graph, which yields a full
         // relation only when it closes a cycle.
         let relation = if relation.is_full() {
-            debug_print!("{}", format_color("+", index_thread));
+            trace!("thread {index_thread}: full relation");
             relation
         } else if let Some(full) = partial_relations.add(relation) {
-            debug_print!("{}", format_color(":", index_thread));
+            trace!("thread {index_thread}: partial relation, completing a full one");
             full
         } else {
-            debug_print!("{}", format_color(".", index_thread));
+            trace!("thread {index_thread}: partial relation");
             continue;
         };
         for &c in &relation.factors {
@@ -457,15 +490,16 @@ fn collect_relations(
         }
         sparse.push_sparse(relation.factors, (relation.u, relation.v));
         if sparse.len().is_multiple_of(progress_step) {
-            let step = sparse.len() / progress_step;
-            let elapsed = last_step_time.elapsed();
-            print!("({step}: {} ms)", elapsed.as_millis());
-            io::stdout().flush().unwrap();
-            last_step_time = Instant::now();
+            info!(
+                "{} relations ({}% of at most {max_relations}) after {:.2?}",
+                sparse.len(),
+                10 * (sparse.len() / progress_step),
+                collection_start.elapsed()
+            );
         }
     }
-    println!(
-        "\ncollected {} relations ({appeared_count} primes appearing) in {:.2?}",
+    info!(
+        "collected {} relations ({appeared_count} primes appearing) in {:.2?}",
         sparse.len(),
         collection_start.elapsed()
     );
