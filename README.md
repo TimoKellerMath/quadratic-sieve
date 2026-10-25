@@ -102,7 +102,11 @@ builds much faster.
 |---|---|
 | `src/sieve.rs` | Driver: sieving threads, relation collection, both solvers |
 | `src/siqs_generator.rs` | Self-initializing polynomial generation |
-| `src/relations.rs` | Sieving, trial division, large-prime combining, Gaussian elimination |
+| `src/block_sieve.rs` | The sieve, in blocks, with buckets for the large primes |
+| `src/trial_division.rs` | Trial division of the sieve's candidates |
+| `src/large_primes.rs` | Combining partial relations into full ones |
+| `src/gauss.rs` | Incremental Gaussian elimination |
+| `src/square_root.rs` | From a dependency to a factor |
 | `src/linalg.rs` | Block Lanczos and a dense GF(2) solver |
 | `src/number_theory.rs` | Modular square roots, Miller–Rabin, Pollard rho |
 | `src/multiplier.rs` | Multiplier selection and parameter table |

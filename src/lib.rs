@@ -1,11 +1,15 @@
+pub mod block_sieve;
 pub mod constants;
 pub mod debug_print;
 pub mod factorbase;
 pub mod format_color;
+pub mod gauss;
+pub mod large_primes;
 pub mod linalg;
 pub mod multiplier;
 pub mod number_theory;
 pub mod polynomial_generator;
-pub mod relations;
 pub mod sieve;
 pub mod siqs_generator;
+pub mod square_root;
+pub mod trial_division;

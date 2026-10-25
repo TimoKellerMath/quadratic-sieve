@@ -8,14 +8,19 @@ use rug::Integer;
 use fixedbitset::FixedBitSet;
 use rustc_hash::FxHashSet;
 
+use crate::block_sieve::{
+    Buckets, SIEVE_CALLS, SIEVE_LOOP_NANOS, SIEVE_SETUP_NANOS, sieve_over_factorbase_blocked,
+};
 use crate::debug_print;
 use crate::factorbase::*;
 use crate::format_color::format_color;
+use crate::gauss::Relations;
+use crate::large_primes::PartialStore;
 use crate::linalg::*;
 use crate::multiplier::*;
 use crate::number_theory::*;
-use crate::relations::*;
 use crate::siqs_generator::*;
+use crate::trial_division::factor_over_factorbase;
 
 /// A (partial) relation sent from a producer (sieving) thread to the consumer:
 /// `(u, v, relation, p, q, index_thread)`, where `p`/`q` are the large primes
@@ -190,13 +195,7 @@ fn run_sieve_producer(
                             let idx = i + j;
                             let x = (idx as i32) - (sieve_interval_length as i32);
                             prof_candidates += 1;
-                            evaluate_polynomial_at(
-                                x,
-                                &polynomial,
-                                kn,
-                                &mut u_scratch,
-                                &mut v_scratch,
-                            );
+                            polynomial.evaluate(x, kn, &mut u_scratch, &mut v_scratch);
                             if let Some((relation, p, q)) = factor_over_factorbase(
                                 x,
                                 &v_scratch,
@@ -234,7 +233,7 @@ fn run_sieve_producer(
                 if log >= threshold {
                     let x = (i as i32) - (sieve_interval_length as i32);
                     prof_candidates += 1;
-                    evaluate_polynomial_at(x, &polynomial, kn, &mut u_scratch, &mut v_scratch);
+                    polynomial.evaluate(x, kn, &mut u_scratch, &mut v_scratch);
                     if let Some((relation, p, q)) = factor_over_factorbase(
                         x,
                         &v_scratch,

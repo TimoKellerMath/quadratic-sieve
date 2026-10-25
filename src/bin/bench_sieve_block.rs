@@ -1,4 +1,4 @@
-use siqs::relations;
+use siqs::block_sieve;
 
 use std::time::Instant;
 
@@ -80,7 +80,7 @@ fn main() {
     let total_len = 2 * sieve_interval_length;
     let mut buffer = vec![0u8; total_len];
     let mut next_pos: Vec<usize> = Vec::with_capacity(2 * factorbase.len());
-    let mut buckets = relations::Buckets::default();
+    let mut buckets = block_sieve::Buckets::default();
 
     // block sizes to test
     let block_sizes = vec![1024usize, 4096, 16384, 32768, 65536, 2 * 65536, 4 * 65536];
@@ -93,7 +93,7 @@ fn main() {
 
     for &block_size in &block_sizes {
         // warmup
-        let _ = crate::relations::sieve_over_factorbase_blocked(
+        let _ = block_sieve::sieve_over_factorbase_blocked(
             sieve_interval_length,
             &factorbase,
             &roots,
@@ -107,7 +107,7 @@ fn main() {
         // measure
         let start = Instant::now();
         for _ in 0..iters {
-            let _ = crate::relations::sieve_over_factorbase_blocked(
+            let _ = block_sieve::sieve_over_factorbase_blocked(
                 sieve_interval_length,
                 &factorbase,
                 &roots,

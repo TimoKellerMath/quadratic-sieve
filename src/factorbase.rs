@@ -20,7 +20,7 @@ pub fn make_factorbase(n: &Integer, size: usize) -> Vec<u32> {
 
 // Precompute a Barrett reciprocal m = floor(2^64 / p) for each factor-base prime,
 // so the resieve step can compute `x mod p` with a multiply+shift instead of a
-// hardware division (see `x_mod_p` in relations.rs). Entries for the -1 / sentinel
+// hardware division (see `x_mod_p` in trial_division.rs). Entries for the -1 / sentinel
 // slot (p < 2) are 0 and never used: the resieve only touches indices >=
 // NUM_SKIP_PRIMES, where every prime is well above 2.
 pub fn compute_reciprocals(factorbase: &[u32]) -> Vec<u64> {
