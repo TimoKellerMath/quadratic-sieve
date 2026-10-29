@@ -460,11 +460,17 @@ pub fn quadratic_sieve_lanczos(
         dependencies.len(),
         lanczos_start.elapsed()
     );
-    let factor = dependencies
-        .iter()
-        .find_map(|dependency| relations.find_factor(dependency, n));
+    let square_root_start = Instant::now();
+    let mut tried = 0;
+    let factor = dependencies.iter().find_map(|dependency| {
+        tried += 1;
+        relations.find_factor(dependency, n)
+    });
     match &factor {
-        Some(factor) => info!("found factor: {factor}"),
+        Some(factor) => info!(
+            "found factor {factor} with dependency {tried} in {:.2?}",
+            square_root_start.elapsed()
+        ),
         None => warn!("no factor found among the dependencies"),
     }
     Ok(factor)
