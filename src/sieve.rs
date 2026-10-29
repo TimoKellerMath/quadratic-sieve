@@ -291,7 +291,7 @@ fn run_sieve_producer(
         for &i in &candidates {
             let x = (i as i32) - (sieve_interval_length as i32);
             polynomial.evaluate(x, &mut v);
-            if let Some((factors, large_primes)) = trial_division.factor(x, &v, roots) {
+            if let Some((factors, large_primes)) = trial_division.factor(i as u32, &v, roots) {
                 prof_relations[large_primes.count()] += 1;
                 let relation = Relation {
                     u: polynomial.sqrt_mod(x, &params.kn),

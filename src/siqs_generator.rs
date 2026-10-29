@@ -22,7 +22,8 @@ fn product_refu32_to_f32(vector: &[&u32]) -> f32 {
 /// a combination of primes specific to the thread, which keeps the a of different
 /// threads apart, and further primes chosen so that a comes close to its ideal size
 /// √(2n) / M for the sieve interval [−M, M). Within a family, the roots modulo the
-/// factor base are updated by additions.
+/// factor base are updated by additions. The roots are kept as offsets into the
+/// interval, see [`Roots`].
 pub struct SIQSPolynomialData<'a> {
     thread_number: usize,
     // the primes of q: those specific to the thread and their product, the number s
@@ -44,8 +45,11 @@ pub struct SIQSPolynomialData<'a> {
     // q_inv_mod_ps is None, since an Option would double the memory traffic of the
     // root update.
     bainv2ips: Vec<Vec<u32>>,
-    // the roots of the current polynomial modulo the factor-base primes
+    // the roots of the current polynomial modulo the factor-base primes, as offsets
+    // into the sieve interval
     roots: Roots,
+    // the half-length M of the sieve interval [−M, M)
+    m: u64,
 
     // the number of polynomials of the current family generated so far
     j: usize,
@@ -103,6 +107,7 @@ impl<'a> SIQSPolynomialData<'a> {
             b: Integer::from(0),
             c: Integer::from(0),
             roots: Roots::default(),
+            m: sieve_interval_length,
             n,
             factorbase,
             n_roots: roots,
@@ -246,11 +251,25 @@ impl<'a> SIQSPolynomialData<'a> {
         Some(root)
     }
 
+    // The offset (r + M) mod p into the sieve interval [−M, M) of a root r modulo p:
+    // position r + M of the interval stands for x = r.
+    #[inline]
+    fn offset(m: u64, root: u32, p: u32) -> u32 {
+        ((root as u64 + m) % p as u64) as u32
+    }
+
+    // The root r modulo p of an offset (r + M) mod p, the inverse of `offset`.
+    fn root_of_offset(m: u64, offset: u32, p: u32) -> u32 {
+        ((offset as u64 + p as u64 - m % p as u64) % p as u64) as u32
+    }
+
     // The roots of the first polynomial of the current a modulo every factor-base
-    // prime, from the square roots `n_roots` of n: r = a^-1 (±sqrt(n) - b) (mod p).
+    // prime, from the square roots `n_roots` of n: r = a^-1 (±sqrt(n) - b) (mod p),
+    // as offsets into the sieve interval.
     fn compute_roots(&mut self, factorbase: &[u32], n_roots: &[u32]) {
         self.roots.clear();
         assert!(factorbase.len() == self.q_inv_mod_ps.len() && factorbase.len() == n_roots.len());
+        let m = self.m;
         for ((&p, q_inv), &root) in factorbase.iter().zip(&self.q_inv_mod_ps).zip(n_roots) {
             let roots = match q_inv {
                 Some(ainvp) => {
@@ -258,11 +277,14 @@ impl<'a> SIQSPolynomialData<'a> {
                     let b = self.b.mod_u(p) as u64;
                     let root = root as u64;
                     Some((
-                        ((root + p64 - b) % p64 * ainvp % p64) as u32,
-                        ((2 * p64 - root - b) % p64 * ainvp % p64) as u32,
+                        Self::offset(m, ((root + p64 - b) % p64 * ainvp % p64) as u32, p),
+                        Self::offset(m, ((2 * p64 - root - b) % p64 * ainvp % p64) as u32, p),
                     ))
                 }
-                None => Self::linear_root_mod_p(&self.b, &self.c, p).map(|root| (root, root)),
+                None => Self::linear_root_mod_p(&self.b, &self.c, p).map(|root| {
+                    let offset = Self::offset(m, root, p);
+                    (offset, offset)
+                }),
             };
             self.roots.push(roots);
         }
@@ -413,12 +435,13 @@ impl<'a> SIQSPolynomialData<'a> {
         let c = (b.square_ref().complete() - self.n).div_exact(&self.a);
         debug_assert_eq!(b.clone().square() - self.a.clone() * c.clone(), *self.n);
 
-        // update the roots for the new b
+        // update the roots for the new b; the offsets change like the roots
         assert!(
             self.roots.len() == self.q_inv_mod_ps.len()
                 && self.factorbase.len() == self.roots.len()
                 && self.roots.len() == self.bainv2ips[nu].len()
         );
+        let m = self.m;
         for ((((r1, r2), &p), q_inv), &bainv) in self
             .roots
             .r1
@@ -431,7 +454,10 @@ impl<'a> SIQSPolynomialData<'a> {
             if q_inv.is_none() {
                 // p | a (or p <= 2): Q is linear mod p, with a single root
                 (*r1, *r2) = match Self::linear_root_mod_p(&b, &c, p) {
-                    Some(root) => (root, root),
+                    Some(root) => {
+                        let offset = Self::offset(m, root, p);
+                        (offset, offset)
+                    }
                     None => (Roots::NONE, Roots::NONE),
                 };
             } else if *r1 != Roots::NONE {
@@ -439,18 +465,11 @@ impl<'a> SIQSPolynomialData<'a> {
                     Self::new_roots_with_sign((*r1, *r2), bainv, p, rounded_exponent % 2 != 0);
                 (*r1, *r2) = new_roots;
                 // check that they are roots of Q
-                debug_assert!(
-                    (self.a.clone() * new_roots.0 * new_roots.0
-                        + 2u32 * b.clone() * new_roots.0
-                        + c.clone())
-                    .is_divisible_u(p)
-                );
-                debug_assert!(
-                    (self.a.clone() * new_roots.1 * new_roots.1
-                        + 2u32 * b.clone() * new_roots.1
-                        + c.clone())
-                    .is_divisible_u(p)
-                );
+                debug_assert!([new_roots.0, new_roots.1].iter().all(|&offset| {
+                    let root = Self::root_of_offset(m, offset, p);
+                    (self.a.clone() * root * root + 2u32 * b.clone() * root + c.clone())
+                        .is_divisible_u(p)
+                }));
             }
         }
         (
@@ -635,8 +654,9 @@ mod tests {
         }
     }
 
-    // Across whole families, every root solves Q(r) ≡ 0 (mod p), a prime has a
-    // single root exactly when it divides a, and c = (b^2 - n)/a is exact.
+    // Across whole families, every root solves Q(r) ≡ 0 (mod p), as an offset into
+    // the interval, a prime has a single root exactly when it divides a, and
+    // c = (b^2 - n)/a is exact.
     #[test]
     fn polynomials_and_roots_are_consistent() {
         let n = "6427752177035961102167848371107669985402627402189138248671463"
@@ -659,8 +679,10 @@ mod tests {
                 };
                 for r in [r1, r2] {
                     assert!(r < p, "root {r} mod {p} is not reduced");
-                    let q_r = a.clone() * r * r + b.clone() * 2u32 * r + c;
-                    assert_eq!(q_r.mod_u(p), 0, "Q({r}) != 0 mod {p}");
+                    // offset r stands for x = r - M, with M = 65536
+                    let x = r as i32 - 65536;
+                    let q_x = a.clone() * x * x + b.clone() * 2u32 * x + c;
+                    assert_eq!(q_x.mod_u(p), 0, "Q({x}) != 0 mod {p}");
                 }
                 assert_eq!(r1 == r2, a.is_divisible_u(p), "number of roots mod {p}");
             }

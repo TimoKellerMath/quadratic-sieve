@@ -4,23 +4,21 @@ use crate::polynomial_generator::Roots;
 use crate::relation::LargePrimes;
 use rug::{Assign, Integer};
 
-// Compute `x.rem_euclid(p)` (result in [0, p)) using a precomputed Barrett
-// reciprocal `recip = floor(2^64 / p)`, replacing the per-prime hardware division
-// in the resieve loop with a multiply+shift. `x` is given split into magnitude and
-// sign so the same reduction serves the byte- and u64-cofactor passes.
+// Compute `pos % p` using a precomputed Barrett reciprocal `recip = floor(2^64 / p)`,
+// replacing the per-prime hardware division in the root check with a multiply and
+// a shift.
 //
-// Correctness: for a = |x| < 2^32 and p in [2, 2^32), q = floor(a*recip / 2^64) is
-// floor(a/p) or one less, so r = a - q*p lands in [0, 2p) and a single conditional
-// subtraction reduces it to a mod p. The Euclidean fixup maps a negative x to p - r.
+// Correctness: for pos < 2^32 and p in [2, 2^32), q = floor(pos*recip / 2^64) is
+// floor(pos/p) or one less, so r = pos - q*p lands in [0, 2p) and a single
+// conditional subtraction reduces it to pos mod p.
 #[inline]
-fn x_mod_p(x_abs: u32, x_neg: bool, p: u32, recip: u64) -> u32 {
-    let q = ((x_abs as u128 * recip as u128) >> 64) as u64;
-    let mut r = x_abs as u64 - q * p as u64;
+fn pos_mod_p(pos: u32, p: u32, recip: u64) -> u32 {
+    let q = ((pos as u128 * recip as u128) >> 64) as u64;
+    let mut r = pos as u64 - q * p as u64;
     if r >= p as u64 {
         r -= p as u64;
     }
-    let r = r as u32;
-    if x_neg && r != 0 { p - r } else { r }
+    r as u32
 }
 
 /// Trial division of the sieve's candidates over the factor base, with the bounds
@@ -60,14 +58,16 @@ impl<'a> TrialDivision<'a> {
         }
     }
 
-    /// Factors y = Q(x) over the factor base, dividing only by the sieved primes p
-    /// for which x is one of the `roots` of Q modulo p. Returns the indices of the
-    /// factor-base primes with an odd exponent, in increasing order, and the large
-    /// primes left: none for a full relation, one or, with the double large prime
-    /// variation, two for a partial one. `None` if y is 0 or not smooth enough.
+    /// Factors y = Q(x) over the factor base, where `pos` = x + M is the position of
+    /// x in the sieve interval [−M, M), dividing only by the sieved primes p for
+    /// which `pos` is one of the offsets `roots` of Q modulo p. Returns the indices
+    /// of the factor-base primes with an odd exponent, in increasing order, and the
+    /// large primes left: none for a full relation, one or, with the double large
+    /// prime variation, two for a partial one. `None` if y is 0 or not smooth
+    /// enough.
     pub fn factor(
         &mut self,
-        x: i32,
+        pos: u32,
         y: &Integer,
         roots: &Roots,
     ) -> Option<(Vec<u32>, LargePrimes)> {
@@ -108,12 +108,9 @@ impl<'a> TrialDivision<'a> {
             }
         }
 
-        // x is constant across the resieve; reduce it mod each p via the Barrett
-        // reciprocals instead of a hardware divide per prime.
-        let x_abs = x.unsigned_abs();
-        let x_neg = x < 0;
-        // indices NUM_SKIP_PRIMES..: sieved primes. p | Q(x) iff x ≡ root1 or root2 (mod p),
-        // so skip the big-int divisibility test for primes that don't hit x.
+        // indices NUM_SKIP_PRIMES..: sieved primes. p | Q(x) iff pos ≡ root1 or root2
+        // (mod p), so skip the big-int divisibility test for primes that don't hit
+        // pos, which is reduced mod each p with the Barrett reciprocals.
         // Switch to u64 arithmetic once the cofactor fits in 63 bits. Its size only
         // changes when a prime divides it, so check it only then: significant_bits is
         // a GMP call, too slow to make for every prime.
@@ -123,8 +120,8 @@ impl<'a> TrialDivision<'a> {
             let p = factorbase[i];
             let divides = match roots.get(i) {
                 Some((r1, r2)) => {
-                    let xmp = x_mod_p(x_abs, x_neg, p, reciprocals[i]);
-                    xmp == r1 || xmp == r2
+                    let pmp = pos_mod_p(pos, p, reciprocals[i]);
+                    pmp == r1 || pmp == r2
                 }
                 None => y_.is_divisible_u(p), // no roots known: divide
             };
@@ -160,8 +157,8 @@ impl<'a> TrialDivision<'a> {
             }
             let divides = match roots.get(i) {
                 Some((r1, r2)) => {
-                    let xmp = x_mod_p(x_abs, x_neg, factorbase[i], reciprocals[i]) as u64;
-                    xmp == r1 as u64 || xmp == r2 as u64
+                    let pmp = pos_mod_p(pos, factorbase[i], reciprocals[i]);
+                    pmp == r1 || pmp == r2
                 }
                 None => y_u64 % p == 0,
             };
@@ -234,27 +231,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn x_mod_p_matches_rem_euclid() {
+    fn pos_mod_p_matches_remainder() {
         // a spread of factor-base-sized primes, including the largest that fits in u32
         let primes: [u32; 7] = [5, 97, 65537, 1_000_003, 16_777_213, 100_003, 4_294_967_291];
-        // x values: extremes plus a scattering of both signs
-        let xs: [i32; 9] = [
+        // positions: extremes plus a scattering
+        let positions: [u32; 8] = [
             0,
             1,
-            -1,
-            i32::MAX,
-            i32::MIN,
+            65_536,
             1_234_567,
-            -1_234_567,
-            -65_536,
+            (1 << 24) - 1,
             2_000_000_000,
+            i32::MAX as u32,
+            u32::MAX,
         ];
         for &p in &primes {
             let recip = ((1u128 << 64) / p as u128) as u64;
-            for &x in &xs {
-                let got = x_mod_p(x.unsigned_abs(), x < 0, p, recip);
-                let want = (x as i64).rem_euclid(p as i64) as u32;
-                assert_eq!(got, want, "x_mod_p({x}, {p})");
+            for &pos in &positions {
+                assert_eq!(pos_mod_p(pos, p, recip), pos % p, "pos_mod_p({pos}, {p})");
             }
         }
     }
@@ -346,7 +340,7 @@ mod tests {
         let mut outcomes = [0usize; 4];
         for x in -65536..65536 {
             polynomial.evaluate(x, &mut y);
-            let got = trial_division.factor(x, &y, roots);
+            let got = trial_division.factor((x + 65536) as u32, &y, roots);
             let want = brute_force_relation(&y, &factorbase, large_prime_multiplier);
             assert_eq!(got, want, "x = {x}");
             outcomes[want.map_or(0, |(_, large_primes)| 1 + large_primes.count())] += 1;

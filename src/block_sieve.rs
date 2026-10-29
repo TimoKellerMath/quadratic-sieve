@@ -77,9 +77,10 @@ unsafe fn push_hit(data: *mut u32, ends: *mut usize, block: usize, entry: u32) {
 
 /// Sieves one polynomial over the interval [−M, M), M = `sieve_interval_length`:
 /// position i of `logs_for_polynomial` stands for x = i − M and receives the sum of
-/// `logs[j]` over the roots r of the polynomial modulo `factorbase[j]` with x ≡ r,
-/// for every j from [`NUM_SKIP_PRIMES`] on. Returns the sum of the logs of the
-/// skipped primes, which the threshold has to account for.
+/// `logs[j]` over the roots of the polynomial modulo `factorbase[j]`, given as
+/// offsets r into the interval (see [`Roots`]), with i ≡ r, for every j from
+/// [`NUM_SKIP_PRIMES`] on. Returns the sum of the logs of the skipped primes, which
+/// the threshold has to account for.
 ///
 /// The interval is sieved in blocks of `block_size` positions, a power of two, so
 /// that a block stays in the cache; a `block_size` of at least 2M gives one block.
@@ -143,7 +144,7 @@ pub fn sieve_over_factorbase_blocked(
         }
         let log_packed = (log as u32) << 24;
         let p_us = p as usize;
-        let mut pos = (root1 as usize + sieve_interval_length) % p_us;
+        let mut pos = root1 as usize;
         while pos < total_len {
             // SAFETY: pos < total_len, so the block index is below num_blocks, and
             // the stride leaves room for every hit
@@ -151,7 +152,7 @@ pub fn sieve_over_factorbase_blocked(
             pos += p_us;
         }
         if root2 != root1 {
-            let mut pos = (root2 as usize + sieve_interval_length) % p_us;
+            let mut pos = root2 as usize;
             while pos < total_len {
                 // SAFETY: as above
                 unsafe { push_hit(data, ends, pos >> block_shift, pos as u32 | log_packed) };
@@ -164,18 +165,13 @@ pub fn sieve_over_factorbase_blocked(
     // two per prime; usize::MAX marks a missing root (no roots, or the second copy
     // of a double root)
     next_pos.clear();
-    for ((&p, &root1), &root2) in factorbase[ns..split]
-        .iter()
-        .zip(&roots.r1[ns..split])
-        .zip(&roots.r2[ns..split])
-    {
+    for (&root1, &root2) in roots.r1[ns..split].iter().zip(&roots.r2[ns..split]) {
         if root1 != Roots::NONE {
-            let p_us = p as usize;
-            next_pos.push((root1 as usize + sieve_interval_length) % p_us);
+            next_pos.push(root1 as usize);
             if root2 == root1 {
                 next_pos.push(usize::MAX); // marker: skip
             } else {
-                next_pos.push((root2 as usize + sieve_interval_length) % p_us);
+                next_pos.push(root2 as usize);
             }
         } else {
             next_pos.push(usize::MAX);
@@ -248,7 +244,8 @@ mod tests {
     use super::*;
 
     // Naive reference sieve: for each non-skipped prime, walk every hit over the
-    // whole window. The blocked/bucketed sieve must produce a byte-identical buffer.
+    // whole window, from the offsets. The blocked/bucketed sieve must produce a
+    // byte-identical buffer.
     fn reference_sieve(
         sieve_interval_length: usize,
         factorbase: &[u32],
@@ -264,7 +261,7 @@ mod tests {
             let p = factorbase[i] as usize;
             let log = logs[i];
             let mut walk = |r: u32| {
-                let mut pos = (r as usize + sieve_interval_length) % p;
+                let mut pos = r as usize;
                 while pos < total_len {
                     buf[pos] = buf[pos].wrapping_add(log);
                     pos += p;

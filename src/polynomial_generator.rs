@@ -43,10 +43,14 @@ impl Polynomial<'_> {
     }
 }
 
-/// The roots of a sieving polynomial modulo each factor-base prime, in two arrays
-/// so that loops over them need neither tags nor padding: prime `i` has the roots
-/// `r1[i]` and `r2[i]`, which are equal if Q is linear modulo the prime (p | a),
-/// and `r1[i] == Roots::NONE` if it has no roots.
+/// The roots of a sieving polynomial modulo each factor-base prime, as offsets into
+/// the sieve interval [−M, M): the offset of a root r modulo p is (r + M) mod p, so
+/// that p divides Q(x) at the positions i = x + M of the interval with i ≡ offset
+/// (mod p), which the sieve reads off directly.
+///
+/// They are kept in two arrays so that loops over them need neither tags nor
+/// padding: prime `i` has the offsets `r1[i]` and `r2[i]`, which are equal if Q is
+/// linear modulo the prime (p | a), and `r1[i] == Roots::NONE` if it has no roots.
 #[derive(Debug, Clone, Default)]
 pub struct Roots {
     /// The first root modulo each prime, or [`Roots::NONE`].
