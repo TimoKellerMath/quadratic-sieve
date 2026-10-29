@@ -24,6 +24,84 @@ fn pos_mod_p(pos: u32, p: u32, inverse: f32) -> u32 {
     }
 }
 
+/// The sum of `logs[i]` over the indices i of `indices` whose prime divides Q at the
+/// position `pos` of the sieve interval: pos ≡ r1 or r2 (mod p) for the offsets
+/// `roots`, a double root counted once, as the sieve would have added them. For the
+/// primes that the small prime variation does not sieve; without SIMD.
+fn divisor_logs_scalar(
+    pos: u32,
+    indices: Range<usize>,
+    factorbase: &[u32],
+    roots: &Roots,
+    inverses: &[f32],
+    logs: &[u8],
+) -> u32 {
+    indices
+        .filter(|&i| {
+            let r = pos_mod_p(pos, factorbase[i], inverses[i]);
+            r == roots.r1[i] || r == roots.r2[i]
+        })
+        .map(|i| logs[i] as u32)
+        .sum()
+}
+
+/// [`divisor_logs_scalar`] without SIMD.
+#[cfg(not(target_feature = "avx2"))]
+pub(crate) fn divisor_logs(
+    pos: u32,
+    indices: Range<usize>,
+    factorbase: &[u32],
+    roots: &Roots,
+    inverses: &[f32],
+    logs: &[u8],
+) -> u32 {
+    divisor_logs_scalar(pos, indices, factorbase, roots, inverses, logs)
+}
+
+/// [`divisor_logs_scalar`] for 8 primes at a time, and the rest scalar.
+#[cfg(target_feature = "avx2")]
+pub(crate) fn divisor_logs(
+    pos: u32,
+    indices: Range<usize>,
+    factorbase: &[u32],
+    roots: &Roots,
+    inverses: &[f32],
+    logs: &[u8],
+) -> u32 {
+    use std::arch::x86_64::*;
+    // the arrays the vectors are loaded from, all as long as the factor base
+    let n = factorbase.len();
+    let (r1s, r2s, inverses, logs) = (&roots.r1[..n], &roots.r2[..n], &inverses[..n], &logs[..n]);
+    assert!(indices.end <= n);
+    let mut i = indices.start;
+    // SAFETY: AVX2 is enabled at compile time, and i + 8 <= indices.end <= n, the
+    // length of all five arrays
+    let sum = unsafe {
+        let (pos_i, pos_f) = (_mm256_set1_epi32(pos as i32), _mm256_set1_ps(pos as f32));
+        let mut sums = _mm256_setzero_si256();
+        while i + 8 <= indices.end {
+            let p = _mm256_loadu_si256(factorbase.as_ptr().add(i).cast());
+            let r = pos_mod_p_avx2(pos_i, pos_f, p, _mm256_loadu_ps(inverses.as_ptr().add(i)));
+            let r1 = _mm256_loadu_si256(r1s.as_ptr().add(i).cast());
+            let r2 = _mm256_loadu_si256(r2s.as_ptr().add(i).cast());
+            let hit = _mm256_or_si256(_mm256_cmpeq_epi32(r, r1), _mm256_cmpeq_epi32(r, r2));
+            // the 8 logs, widened to the lanes
+            let log = _mm256_cvtepu8_epi32(_mm_loadl_epi64(logs.as_ptr().add(i).cast()));
+            sums = _mm256_add_epi32(sums, _mm256_and_si256(hit, log));
+            i += 8;
+        }
+        // the sum of the lanes
+        let s = _mm_add_epi32(
+            _mm256_castsi256_si128(sums),
+            _mm256_extracti128_si256(sums, 1),
+        );
+        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
+        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b10_11_00_01));
+        _mm_cvtsi128_si32(s) as u32
+    };
+    sum + divisor_logs_scalar(pos, i..indices.end, factorbase, roots, inverses, logs)
+}
+
 /// How the root check reduces a position pos < 2M modulo the primes of a range.
 #[derive(Clone, Copy)]
 enum Reduction {
@@ -488,6 +566,51 @@ mod tests {
                         panic!("position {pos}, inverses {k}: {lanes:?}");
                     }
                 }
+            }
+        }
+    }
+
+    // The logs of the dividing primes, scalar and the ones compiled in, agree with
+    // brute force at every position, for ranges with and without a rest after the
+    // vectors.
+    #[test]
+    fn divisor_logs_are_the_logs_of_the_dividing_primes() {
+        let n: Integer = "6427752177035961102167848371107669985402627402189138248671463"
+            .parse()
+            .unwrap();
+        let factorbase = crate::factorbase::make_factorbase(&n, 500);
+        let n_roots = crate::factorbase::square_roots_mod_factorbase(&n, &factorbase);
+        let inverses = crate::factorbase::compute_inverses(&factorbase);
+        let logs = crate::factorbase::compute_logs(&factorbase);
+        let m = 20000u32;
+        let mut generators = crate::siqs_generator::new_polynomial_generators(
+            &n,
+            m as u64,
+            1,
+            &factorbase,
+            &n_roots,
+            &factorbase,
+        );
+        let (_, roots) = generators[0].next_polynomial();
+        for indices in [NUM_SKIP_PRIMES..37, NUM_SKIP_PRIMES..38, 50..450] {
+            for pos in 0..2 * m {
+                let want: u32 = indices
+                    .clone()
+                    .filter(|&i| {
+                        let r = pos % factorbase[i];
+                        r == roots.r1[i] || r == roots.r2[i]
+                    })
+                    .map(|i| logs[i] as u32)
+                    .sum();
+                let args = (indices.clone(), &factorbase, roots, &inverses, &logs);
+                assert_eq!(
+                    divisor_logs(pos, args.0.clone(), args.1, args.2, args.3, args.4),
+                    want
+                );
+                assert_eq!(
+                    divisor_logs_scalar(pos, args.0, args.1, args.2, args.3, args.4),
+                    want
+                );
             }
         }
     }

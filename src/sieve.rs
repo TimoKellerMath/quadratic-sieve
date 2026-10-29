@@ -8,18 +8,21 @@ use rug::integer::IsPrime;
 use rug::{Complete, Integer};
 
 use crate::block_sieve::{
-    Blocking, SIEVE_CALLS, SIEVE_LOOP_NANOS, SIEVE_SETUP_NANOS, SieveScratch,
+    Blocking, SIEVE_CALLS, SIEVE_LOOP_NANOS, SIEVE_SETUP_NANOS, SieveScratch, SievedPrimes,
     sieve_over_factorbase_blocked, skipped_logs,
 };
+use crate::constants::NUM_SKIP_PRIMES;
 use crate::factorbase::*;
 use crate::large_primes::PartialStore;
 use crate::linalg::*;
 use crate::machine::SIEVE_BLOCK_SIZE;
 use crate::multiplier::*;
 use crate::number_theory::*;
+use crate::polynomial_generator::Roots;
 use crate::relation::Relation;
 use crate::siqs_generator::*;
-use crate::trial_division::{TrialDivision, dlp_bound};
+use crate::trial_division::{TrialDivision, divisor_logs, dlp_bound};
+use std::ops::Range;
 
 /// A full or partial relation sent from a sieving thread to the collecting
 /// thread, with the index of the sieving thread.
@@ -101,6 +104,12 @@ struct SieveParams {
     lp_slack: u32,
     // the sum of the logs of the factor-base entries the sieve skips
     skipped_logs: u32,
+    // the index of the first factor-base prime sieved: with the small prime
+    // variation, the primes from NUM_SKIP_PRIMES up to SIQS_SPV_BOUND are left to
+    // the second stage of the scan
+    first_sieved: usize,
+    // the bits by which the first stage of the scan lowers the thresholds then
+    spv_allowance: u8,
     // the sieve's blocks and sub-blocks
     blocking: Blocking,
 }
@@ -179,6 +188,24 @@ impl SieveParams {
             lp_slack_multiplier(use_dlp, n_bits),
         );
         let skipped = skipped_logs(&logs);
+        // the small prime variation: the sieve leaves the primes up to the bound to
+        // the second stage of the scan, for factor bases large enough that it pays
+        // (msieve: from 800 primes). Up to 256, as in YAFU, measured: 301 bits
+        // +13.5% polynomials per second, 251 bits +4.4%; up to 512: +2% more at 301
+        // bits, within noise.
+        let default_spv_bound = if factorbase.len() >= 1000 { 256 } else { 0 };
+        let spv_bound: u32 = env_override("SIQS_SPV_BOUND").unwrap_or(default_spv_bound);
+        let first_sieved = factorbase
+            .partition_point(|&p| p <= spv_bound)
+            .max(NUM_SKIP_PRIMES);
+        let spv_allowance = env_override("SIQS_SPV_ALLOWANCE").unwrap_or(30);
+        if first_sieved > NUM_SKIP_PRIMES {
+            info!(
+                "small prime variation: {} primes up to {spv_bound} not sieved, \
+                 first-stage thresholds {spv_allowance} bits lower",
+                first_sieved - NUM_SKIP_PRIMES
+            );
+        }
         Ok(SieveParams {
             k,
             kn,
@@ -193,6 +220,8 @@ impl SieveParams {
             dlp_bound,
             lp_slack,
             skipped_logs: skipped,
+            first_sieved,
+            spv_allowance,
             blocking: Blocking::with_size(block_size),
         })
     }
@@ -226,8 +255,19 @@ fn run_sieve_producer(
     let mut sieve_scratch = SieveScratch::default();
     // the sieve thresholds of a polynomial, one per scan window, reused across
     // polynomials
-    const SCAN_WINDOW: usize = 16384;
     let mut thresholds = Vec::new();
+    let sieved = SievedPrimes {
+        primes: &params.factorbase,
+        logs: &params.logs,
+        first: params.first_sieved,
+    };
+    let unsieved = Unsieved {
+        indices: NUM_SKIP_PRIMES.min(params.first_sieved)..params.first_sieved,
+        allowance: params.spv_allowance,
+        factorbase: &params.factorbase,
+        logs: &params.logs,
+        inverses: &params.inverses,
+    };
     // positions of a polynomial's candidates, reused across polynomials
     let mut candidates = Vec::new();
     let mut trial_division = TrialDivision::new(
@@ -299,27 +339,20 @@ fn run_sieve_producer(
         let mut prof_scan_blocks = Duration::ZERO;
         sieve_over_factorbase_blocked(
             sieve_interval_length,
-            &params.factorbase,
+            sieved,
             roots,
-            &params.logs,
             &mut sieve_scratch,
             params.blocking,
             |block_start, sums| {
                 let prof_t = profile.then(Instant::now);
-                // the windows overlapping the block, cut at its ends
-                let block_end = block_start + sums.len();
-                let mut start = block_start;
-                while start < block_end {
-                    let window = start / SCAN_WINDOW;
-                    let end = ((window + 1) * SCAN_WINDOW).min(block_end);
-                    find_candidates(
-                        &sums[start - block_start..end - block_start],
-                        thresholds[window],
-                        start,
-                        &mut candidates,
-                    );
-                    start = end;
-                }
+                scan_block(
+                    block_start,
+                    sums,
+                    &thresholds,
+                    &unsieved,
+                    roots,
+                    &mut candidates,
+                );
                 if let Some(t) = prof_t {
                     prof_scan_blocks += t.elapsed();
                 }
@@ -373,6 +406,83 @@ fn run_sieve_producer(
                 );
             }
         }
+    }
+}
+
+/// The scan windows, each with its own threshold.
+const SCAN_WINDOW: usize = 16384;
+
+/// The primes the sieve leaves to the second stage of the scan, with the small prime
+/// variation, and what the second stage needs to find which of them divide Q at a
+/// position.
+struct Unsieved<'a> {
+    // the indices of the primes
+    indices: Range<usize>,
+    // the bits by which the first stage lowers the thresholds
+    allowance: u8,
+    factorbase: &'a [u32],
+    logs: &'a [u8],
+    inverses: &'a [f32],
+}
+
+/// Appends to `candidates` the positions of a sieved block, from `block_start` on,
+/// whose sums reach the threshold of their window of [`SCAN_WINDOW`] positions,
+/// `thresholds[w]` for window w of the interval. With primes left `unsieved`, the
+/// first stage scans with thresholds lowered by the allowance, and the second keeps
+/// a position only if its sum plus the logs of the unsieved primes that divide Q
+/// there reaches the threshold: the positions that sieving all primes would give,
+/// unless the unsieved primes add more than the allowance.
+fn scan_block(
+    block_start: usize,
+    sums: &[u8],
+    thresholds: &[u8],
+    unsieved: &Unsieved,
+    roots: &Roots,
+    candidates: &mut Vec<u32>,
+) {
+    let second_stage = !unsieved.indices.is_empty();
+    // the windows overlapping the block, cut at its ends
+    let block_end = block_start + sums.len();
+    let mut start = block_start;
+    while start < block_end {
+        let window = start / SCAN_WINDOW;
+        let end = ((window + 1) * SCAN_WINDOW).min(block_end);
+        let threshold = thresholds[window];
+        let first_new = candidates.len();
+        // with a lower threshold of 0, every position is a candidate of the first
+        // stage, also one that no sieved prime divides
+        let first_stage = if second_stage {
+            threshold.saturating_sub(unsieved.allowance)
+        } else {
+            threshold
+        };
+        find_candidates(
+            &sums[start - block_start..end - block_start],
+            first_stage,
+            start,
+            candidates,
+        );
+        if second_stage {
+            let mut kept = first_new;
+            for k in first_new..candidates.len() {
+                let pos = candidates[k];
+                let sum = sums[pos as usize - block_start] as u32
+                    + divisor_logs(
+                        pos,
+                        unsieved.indices.clone(),
+                        unsieved.factorbase,
+                        roots,
+                        unsieved.inverses,
+                        unsieved.logs,
+                    );
+                if sum >= threshold as u32 {
+                    candidates[kept] = pos;
+                    kept += 1;
+                }
+            }
+            candidates.truncate(kept);
+        }
+        start = end;
     }
 }
 
@@ -627,6 +737,73 @@ mod tests {
                 assert_eq!(got[1..], want, "scan {s}, threshold {threshold}");
             }
         }
+    }
+
+    // With the small prime variation and an allowance that lets the first stage
+    // pass every position, the scan finds exactly the candidates of sieving all
+    // primes; with a realistic allowance, a subset.
+    #[test]
+    fn small_prime_variation_keeps_the_candidates() {
+        use crate::block_sieve::{Blocking, SieveScratch, SievedPrimes};
+        let n: Integer = "6427752177035961102167848371107669985402627402189138248671463"
+            .parse()
+            .unwrap();
+        let factorbase = crate::factorbase::make_factorbase(&n, 2000);
+        let n_roots = crate::factorbase::square_roots_mod_factorbase(&n, &factorbase);
+        let logs = crate::factorbase::compute_logs(&factorbase);
+        let inverses = crate::factorbase::compute_inverses(&factorbase);
+        let m = 65536usize;
+        let mut generators =
+            new_polynomial_generators(&n, m as u64, 1, &factorbase, &n_roots, &factorbase);
+        let first_sieved = factorbase.partition_point(|&p| p <= 256);
+        assert!(first_sieved > NUM_SKIP_PRIMES + 20);
+        let mut scratch = SieveScratch::default();
+        let mut candidates = |roots: &Roots, first: usize, allowance: u8, threshold: u8| {
+            let mut candidates = Vec::new();
+            let thresholds = vec![threshold; (2 * m).div_ceil(SCAN_WINDOW)];
+            let unsieved = Unsieved {
+                indices: NUM_SKIP_PRIMES..first,
+                allowance,
+                factorbase: &factorbase,
+                logs: &logs,
+                inverses: &inverses,
+            };
+            let sieved = SievedPrimes {
+                primes: &factorbase,
+                logs: &logs,
+                first,
+            };
+            sieve_over_factorbase_blocked(
+                m,
+                sieved,
+                roots,
+                &mut scratch,
+                Blocking::with_size(1 << 15),
+                |block_start, sums| {
+                    scan_block(
+                        block_start,
+                        sums,
+                        &thresholds,
+                        &unsieved,
+                        roots,
+                        &mut candidates,
+                    )
+                },
+            );
+            candidates
+        };
+        let mut found = 0;
+        for _ in 0..3 {
+            let (_, roots) = generators[0].next_polynomial();
+            for threshold in [40, 55, 70] {
+                let all = candidates(roots, NUM_SKIP_PRIMES, 0, threshold);
+                found += all.len();
+                assert_eq!(candidates(roots, first_sieved, 255, threshold), all);
+                let some = candidates(roots, first_sieved, 20, threshold);
+                assert!(some.iter().all(|pos| all.contains(pos)));
+            }
+        }
+        assert!(found > 100, "only {found} candidates");
     }
 
     #[test]

@@ -88,6 +88,20 @@ unsafe fn push_hit(data: *mut u32, ends: *mut usize, block: usize, entry: u32) {
     }
 }
 
+/// The factor base as [`sieve_over_factorbase_blocked`] sees it: the primes, sorted
+/// ascending, their logs, and the index of the first prime it sieves, at least
+/// [`NUM_SKIP_PRIMES`]. With the small prime variation, it skips more of the
+/// smallest primes than those, whose many hits cost more than their logs are worth.
+#[derive(Clone, Copy, Debug)]
+pub struct SievedPrimes<'a> {
+    /// The factor base.
+    pub primes: &'a [u32],
+    /// The logs of its primes.
+    pub logs: &'a [u8],
+    /// The index of the first prime sieved.
+    pub first: usize,
+}
+
 /// How [`sieve_over_factorbase_blocked`] divides the interval: into blocks of `size`
 /// positions, and these into sub-blocks of `sub_size` positions, through which the
 /// primes up to `sub_bound` are walked one sub-block at a time, so that their many
@@ -174,9 +188,10 @@ unsafe fn carry_walk(
 }
 
 /// Sieves one polynomial over the interval [−M, M), M = `sieve_interval_length`:
-/// position i of the interval stands for x = i − M and receives the sum of `logs[j]`
-/// over the roots of the polynomial modulo `factorbase[j]`, given as offsets r into
-/// the interval (see [`Roots`]), with i ≡ r, for every j from [`NUM_SKIP_PRIMES`] on.
+/// position i of the interval stands for x = i − M and receives the sum of the logs
+/// of the primes of `factorbase`, from its first sieved one on, over the roots of
+/// the polynomial modulo them, given as offsets r into the interval (see [`Roots`]),
+/// with i ≡ r.
 ///
 /// The interval is sieved in blocks of `blocking.size` positions, a power of two, so
 /// that a block stays in the cache; a size of at least 2M gives one block. Each
@@ -188,17 +203,21 @@ unsafe fn carry_walk(
 /// per root, so its hits are sorted into one bucket per block first, which the block
 /// then drains: this costs a step per hit instead of one per prime and block.
 ///
-/// `factorbase` is sorted ascending, and `roots` and `logs` belong to its primes.
-/// 2M < 2^24, and `scratch` is reused across calls.
+/// `roots` belong to the primes of `factorbase`. 2M < 2^24, and `scratch` is
+/// reused across calls.
 pub fn sieve_over_factorbase_blocked(
     sieve_interval_length: usize,
-    factorbase: &[u32],
+    factorbase: SievedPrimes,
     roots: &Roots,
-    logs: &[u8],
     scratch: &mut SieveScratch,
     blocking: Blocking,
     mut on_block: impl FnMut(usize, &[u8]),
 ) {
+    let SievedPrimes {
+        primes: factorbase,
+        logs,
+        first,
+    } = factorbase;
     let block_size = blocking.size;
     let SieveScratch {
         next_pos,
@@ -219,7 +238,7 @@ pub fn sieve_over_factorbase_blocked(
 
     // factorbase is sorted ascending, so the primes up to block_size form a prefix,
     // [ns, split) after the skipped primes
-    let ns = NUM_SKIP_PRIMES.min(factorbase.len());
+    let ns = first.max(NUM_SKIP_PRIMES).min(factorbase.len());
     let split = factorbase
         .partition_point(|&p| (p as usize) <= block_size)
         .max(ns);
@@ -366,10 +385,11 @@ mod tests {
         factorbase: &[u32],
         roots: &Roots,
         logs: &[u8],
+        first: usize,
     ) -> Vec<u8> {
         let total_len = 2 * sieve_interval_length;
         let mut buf = vec![0u8; total_len];
-        for i in NUM_SKIP_PRIMES..factorbase.len() {
+        for i in first..factorbase.len() {
             let Some((r1, r2)) = roots.get(i) else {
                 continue;
             };
@@ -427,14 +447,13 @@ mod tests {
             .map(|&pr| ((pr.max(2) as f32).log2().round() as u8).max(1))
             .collect();
 
-        let want = reference_sieve(sieve_interval_length, &factorbase, &roots, &logs);
         let total_len = 2 * sieve_interval_length;
         let mut scratch = SieveScratch::default();
         // block sizes that are tiny (many blocks), that don't divide total_len, and
         // that exceed total_len (single block): every prime above the size goes to
         // the buckets. The scratch is reused, so each size must clear its blocks.
         // Sub-blocks of every size, which need not divide the block, for no, some
-        // or all small primes.
+        // or all small primes. The sieve starts after the skipped primes, or later.
         let blockings = [8usize, 16, 64, 256, 512, 1024, 4096, 64, 8]
             .into_iter()
             .flat_map(|size| {
@@ -446,15 +465,24 @@ mod tests {
                     },
                 )
             });
-        for blocking in blockings {
+        for (blocking, first) in blockings.zip(
+            [NUM_SKIP_PRIMES, 20, NUM_SKIP_PRIMES, 70]
+                .into_iter()
+                .cycle(),
+        ) {
+            let want = reference_sieve(sieve_interval_length, &factorbase, &roots, &logs, first);
             let block_size = blocking.size;
             let mut buf = vec![0u8; total_len];
             let mut next_start = 0;
+            let primes = SievedPrimes {
+                primes: &factorbase,
+                logs: &logs,
+                first,
+            };
             sieve_over_factorbase_blocked(
                 sieve_interval_length,
-                &factorbase,
+                primes,
                 &roots,
-                &logs,
                 &mut scratch,
                 blocking,
                 |block_start, sums| {
@@ -466,7 +494,7 @@ mod tests {
                 },
             );
             assert_eq!(next_start, total_len);
-            assert_eq!(buf, want, "mismatch for {blocking:?}");
+            assert_eq!(buf, want, "mismatch for {blocking:?}, first {first}");
         }
     }
 }

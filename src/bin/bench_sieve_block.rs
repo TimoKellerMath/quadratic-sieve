@@ -6,7 +6,8 @@
 // Usage: bench_sieve_block [bits [polynomials [block size in KiB ...]]]
 // Defaults: 301 bits, 1000 polynomials, block sizes of 16 to 512 KiB.
 use rug::Integer;
-use siqs::block_sieve::{Blocking, SieveScratch, sieve_over_factorbase_blocked};
+use siqs::block_sieve::{Blocking, SieveScratch, SievedPrimes, sieve_over_factorbase_blocked};
+use siqs::constants::NUM_SKIP_PRIMES;
 use siqs::factorbase::{compute_logs, make_factorbase, square_roots_mod_factorbase};
 use siqs::multiplier::{compute_multiplier, compute_sieve_parameters};
 use siqs::number_theory::SMALL_PRIMES;
@@ -49,6 +50,19 @@ fn main() {
     factorbase.dedup();
     let square_roots = square_roots_mod_factorbase(&kn, &factorbase);
     let logs = compute_logs(&factorbase);
+    // SIQS_SPV_BOUND: the sieve skips the primes up to it, as with the small prime
+    // variation
+    let spv_bound: u32 = std::env::var("SIQS_SPV_BOUND")
+        .ok()
+        .and_then(|bound| bound.parse().ok())
+        .unwrap_or(0);
+    let primes = SievedPrimes {
+        primes: &factorbase,
+        logs: &logs,
+        first: factorbase
+            .partition_point(|&p| p <= spv_bound)
+            .max(NUM_SKIP_PRIMES),
+    };
     let mut generators = new_polynomial_generators(
         &kn,
         sieve_interval_length as u64,
@@ -82,9 +96,8 @@ fn main() {
             let mut copy = Duration::ZERO;
             sieve_over_factorbase_blocked(
                 sieve_interval_length,
-                &factorbase,
+                primes,
                 roots,
-                &logs,
                 &mut scratch,
                 Blocking::with_size(block_sizes[b]),
                 |block_start, sums| {

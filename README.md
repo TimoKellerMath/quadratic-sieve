@@ -8,8 +8,10 @@ on multiple threads.
 - **Polynomials:** self-initialization (2^(s-1) polynomials per `a`) and a
   Knuth–Schroeppel multiplier.
 - **Sieving:** segmented sieve with bucket sieving for primes larger than the
-  block size, per-block thresholds from the size of Q(x), and an AVX2 threshold
-  scan when compiled with AVX2.
+  block size, L1-sized sub-blocks for the smallest sieved primes, the small prime
+  variation (the primes up to 256 are not sieved, but added back at the
+  positions the scan finds), per-window thresholds from the size of Q(x), and an
+  AVX2 threshold scan when compiled with AVX2.
 - **Trial division:** the primes dividing a candidate are found from the roots,
   for all candidates of a polynomial in one pass over the factor base (with AVX2
   when compiled with it), and only those are divided out.
@@ -83,6 +85,7 @@ documentation, with an overview of the algorithm.
 | `SIQS_FB_SIZE`, `SIQS_M`, `SIQS_LP_MULT` | Override the factor base size, the half-length M of the sieve interval [−M, M) and the large-prime multiplier of the parameter table, for parameter sweeps. |
 | `SIQS_DLP` | `1` or `0` turns the double large prime variation on or off; by default it is on above 250 bits. |
 | `SIQS_DLP_EXP` | A cofactor with two large primes may be up to the large-prime bound to this power, at most 2 (the default). |
+| `SIQS_SPV_BOUND`, `SIQS_SPV_ALLOWANCE` | The small prime variation: the sieve skips the primes up to the bound (256 for factor bases of 1000 primes or more, else 0), and the scan lowers its thresholds by the allowance in bits (30) and adds the logs of the skipped primes that divide Q at the positions found. |
 | `SIQS_BLOCK_KIB` | Sieve block size in KiB, a power of two; by default the largest one up to a quarter of the L2. |
 | `SIQS_PROFILE` | Print per-phase timings of the first sieving thread to stderr every 2000 polynomials. |
 | `SIQS_DUMP_MATRIX=path` | Write the relation matrix to `path` if Block Lanczos fails. |
