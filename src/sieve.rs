@@ -14,7 +14,7 @@ use crate::block_sieve::{
 use crate::factorbase::*;
 use crate::large_primes::PartialStore;
 use crate::linalg::*;
-use crate::machine::Caches;
+use crate::machine::SIEVE_BLOCK_SIZE;
 use crate::multiplier::*;
 use crate::number_theory::*;
 use crate::relation::Relation;
@@ -114,8 +114,8 @@ impl SieveParams {
         let factorbase_size = env_override("SIQS_FB_SIZE").unwrap_or(factorbase_size);
         let sieve_interval_length = env_override("SIQS_M").unwrap_or(sieve_interval_length);
         let large_prime_multiplier = env_override("SIQS_LP_MULT").unwrap_or(large_prime_multiplier);
-        let block_size = env_override::<usize>("SIQS_BLOCK_KIB")
-            .map_or_else(|| Caches::from_env().sieve_block_size(), |kib| kib << 10);
+        let block_size =
+            env_override::<usize>("SIQS_BLOCK_KIB").map_or(SIEVE_BLOCK_SIZE, |kib| kib << 10);
         // the bucket entries pack a position of the interval into 24 bits
         assert!(
             (1..1 << 23).contains(&sieve_interval_length),

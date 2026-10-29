@@ -56,8 +56,15 @@ pub mod large_primes;
 /// Dependencies among the relations: Block Lanczos over GF(2), with a dense
 /// elimination as reference and fallback.
 pub mod linalg;
-/// The caches the sieve is tuned for, with the sizes of another machine from the
-/// environment.
+/// The caches the sieve is tuned for, set at compile time.
+///
+/// The defaults describe the machine on which the parameters were measured, an AMD
+/// Ryzen 7 PRO 6850U (Zen 3+, 8 cores with 2 hardware threads each): 32 KiB of L1d
+/// and 512 KiB of L2 per core, and 16 MiB of L3 shared by all cores. For another
+/// machine, set `SIQS_L1D_KIB`, `SIQS_L2_KIB` or `SIQS_L3_KIB` (in KiB) when
+/// compiling, e.g. `SIQS_L2_KIB=1024 cargo build --release`. The SIMD code is chosen
+/// at compile time too, by the target features (`target-cpu=native` in
+/// `.cargo/config.toml`).
 pub mod machine;
 /// The multiplier and the sieve parameters, both after msieve.
 pub mod multiplier;

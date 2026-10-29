@@ -30,6 +30,12 @@ on multiple threads.
 binaries may not run on other machines, and aligns loops to 64 bytes, so that
 the speed of the hot loops does not depend on where the code lands.
 
+The sieve is tuned for the caches of the machine in [Performance](#performance):
+32 KiB of L1d and 512 KiB of L2 per core, 16 MiB of L3. For another machine, set
+their sizes in KiB when compiling, e.g.
+`SIQS_L1D_KIB=48 SIQS_L2_KIB=2048 SIQS_L3_KIB=32768 cargo build --release`
+(see `src/machine.rs`).
+
 ## Usage
 
 ```sh
@@ -75,7 +81,6 @@ documentation, with an overview of the algorithm.
 | `SIQS_FB_SIZE`, `SIQS_M`, `SIQS_LP_MULT` | Override the factor base size, the half-length M of the sieve interval [−M, M) and the large-prime multiplier of the parameter table, for parameter sweeps. |
 | `SIQS_DLP` | `1` or `0` turns the double large prime variation on or off; by default it is on above 250 bits. |
 | `SIQS_BLOCK_KIB` | Sieve block size in KiB, a power of two; by default the largest one up to a quarter of the L2. |
-| `SIQS_L1D_KIB`, `SIQS_L2_KIB`, `SIQS_L3_KIB` | Cache sizes per core (L1d, L2) and shared (L3) of the machine to tune for, in KiB. The defaults are those of the machine below: 32, 512 and 16384. |
 | `SIQS_PROFILE` | Print per-phase timings of the first sieving thread to stderr every 2000 polynomials. |
 | `SIQS_DUMP_MATRIX=path` | Write the relation matrix to `path` if Block Lanczos fails. |
 | `SIQS_BL_DEBUG` | Print the rank Block Lanczos finds. |
