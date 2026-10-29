@@ -40,7 +40,8 @@ pub struct TrialDivision<'a> {
 
 impl<'a> TrialDivision<'a> {
     /// Trial division over `factorbase` with its Barrett `reciprocals`, for the
-    /// multiplier `k`; `use_dlp` admits two large primes.
+    /// multiplier `k`. Large primes are those below `large_prime_multiplier` times the
+    /// largest factor-base prime, and `use_dlp` admits two of them.
     pub fn new(
         factorbase: &'a [u32],
         reciprocals: &'a [u64],
@@ -59,10 +60,11 @@ impl<'a> TrialDivision<'a> {
         }
     }
 
-    // try to factor y = Q(x) over factorbase, using resieve: only divide by p if x ≡ root (mod p).
-    // On success returns the indices of the factor-base primes with odd exponent, in
-    // increasing order, and the large primes left: none for a full relation, one or (only
-    // when use_dlp is set) two for a partial one.
+    /// Factors y = Q(x) over the factor base, dividing only by the sieved primes p
+    /// for which x is one of the `roots` of Q modulo p. Returns the indices of the
+    /// factor-base primes with an odd exponent, in increasing order, and the large
+    /// primes left: none for a full relation, one or, with the double large prime
+    /// variation, two for a partial one. `None` if y is 0 or not smooth enough.
     pub fn factor(
         &mut self,
         x: i32,
@@ -79,7 +81,7 @@ impl<'a> TrialDivision<'a> {
         // only the rare successful relation is cloned out at the return
         let factors = &mut self.factors;
         factors.clear();
-        // -1 in factorbase
+        // the sign, index 0
         if y_.is_negative() {
             factors.push(0);
             y_.abs_mut();
@@ -124,7 +126,7 @@ impl<'a> TrialDivision<'a> {
                     let xmp = x_mod_p(x_abs, x_neg, p, reciprocals[i]);
                     xmp == r1 || xmp == r2
                 }
-                None => y_.is_divisible_u(p), // p | a: resieve info unavailable
+                None => y_.is_divisible_u(p), // no roots known: divide
             };
             if divides {
                 let mut exp = 0u32;
@@ -148,7 +150,7 @@ impl<'a> TrialDivision<'a> {
         // base, its remaining prime factors are all larger than the largest factor-base
         // prime; it cannot be a (single) large prime below largest_prime * lpm (which
         // is far below 2^64), so this candidate yields no usable relation. This is the
-        // common case for larger N, where Q(x) is big enough that non-smooth cofactors
+        // common case for larger n, where Q(x) is big enough that non-smooth cofactors
         // stay above 64 bits.
         let mut y_u64 = y_.to_u64()?;
         while i < factorbase.len() {

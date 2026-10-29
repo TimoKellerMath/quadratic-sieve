@@ -1,16 +1,20 @@
 use rug::{Assign, Integer};
 use std::fmt::Debug;
 
-/// A sieving polynomial Q(x) = a x^2 + 2 b x + c.
+/// A sieving polynomial Q(x) = a x² + 2 b x + c with b² − a c = n, where a = q² and n
+/// is the number of the generator, kn in the sieve.
 ///
-/// `a` and `q_inverse` are constant across the whole self-initialized set of
-/// 2^(s-1) polynomials sharing one `a`, so they are borrowed from the generator
-/// rather than cloned on every polynomial; only `b` and `c` change.
+/// `a` and `q_inverse` are the same for all 2^(s−1) polynomials of a family, so they
+/// are borrowed from the generator instead of cloned for each polynomial.
 #[derive(Debug)]
 pub struct Polynomial<'a> {
+    /// The coefficient a = q².
     pub a: &'a Integer,
+    /// Half the coefficient of x.
     pub b: Integer,
+    /// The constant coefficient c = (b² − n) / a.
     pub c: Integer,
+    /// q⁻¹ mod n.
     pub q_inverse: &'a Integer,
 }
 
@@ -24,9 +28,8 @@ impl Polynomial<'_> {
         *y += &self.c;
     }
 
-    /// The square root u = (a x + b) q^-1 of Q(x) modulo n, where b^2 - a c = n:
-    /// a = q^2 and a Q(x) = (a x + b)^2 - n. Only needed for the candidates that
-    /// give a relation.
+    /// The square root u = (a x + b) q⁻¹ of Q(x) modulo n, since a Q(x) = (a x + b)² − n.
+    /// Only needed for the candidates that give a relation.
     pub fn sqrt_mod(&self, x: i32, n: &Integer) -> Integer {
         let mut u = Integer::from(self.a * x + &self.b);
         u *= self.q_inverse;
@@ -46,7 +49,9 @@ impl Polynomial<'_> {
 /// and `r1[i] == Roots::NONE` if it has no roots.
 #[derive(Debug, Clone, Default)]
 pub struct Roots {
+    /// The first root modulo each prime, or [`Roots::NONE`].
     pub r1: Vec<u32>,
+    /// The second root modulo each prime.
     pub r2: Vec<u32>,
 }
 

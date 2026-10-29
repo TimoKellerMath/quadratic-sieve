@@ -6,9 +6,14 @@ use std::cmp::Ordering;
 /// into the factor base (index 0 stands for −1), and the large primes left in v.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Relation {
+    /// The square root of v modulo kn.
     pub u: Integer,
+    /// Up to its sign, a product of factor-base primes and large primes.
     pub v: Integer,
+    /// The indices of the factor-base primes with an odd exponent in v, in increasing
+    /// order.
     pub factors: Vec<u32>,
+    /// The large primes in v with an odd exponent.
     pub large_primes: LargePrimes,
 }
 

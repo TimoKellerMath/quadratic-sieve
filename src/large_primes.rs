@@ -13,7 +13,7 @@ use rustc_hash::FxHashMap;
 /// prime set becomes empty it is a completed full relation, otherwise it becomes the
 /// representative for its remaining pivot.
 ///
-/// The single-large-prime variation is the special case where every set has one
+/// The single large prime variation is the special case where every set has one
 /// element: two partials sharing a prime immediately reduce to a full relation.
 #[derive(Default)]
 pub struct PartialRelations {
@@ -21,12 +21,13 @@ pub struct PartialRelations {
 }
 
 impl PartialRelations {
+    /// An empty graph.
     pub fn new() -> PartialRelations {
         PartialRelations::default()
     }
 
-    /// Feed a partial relation. Returns the combined relation if it completes a full
-    /// relation, else stores it.
+    /// Adds a partial relation. Returns the full relation it completes, if any;
+    /// otherwise the partial is stored.
     pub fn add(&mut self, mut relation: Relation) -> Option<Relation> {
         loop {
             let pivot = relation.large_primes.pivot();
@@ -47,17 +48,18 @@ impl PartialRelations {
     }
 }
 
-/// Storage for partial relations, selecting the cheapest scheme for the variation in
-/// use. With the double large prime variation disabled, partials carry a single large
-/// prime and are matched directly through a hash map (the original, lowest-overhead
-/// path). With it enabled, partials carry up to two large primes and are combined
-/// through the cycle-finding graph in [`PartialRelations`].
+/// Storage for partial relations, with the cheaper scheme for the large prime
+/// variation in use.
 pub enum PartialStore {
+    /// Single large primes: the first partial with each prime, by its prime, which
+    /// every later partial with the prime is combined with.
     Single(FxHashMap<u32, Relation>),
+    /// One or two large primes: the cycle-finding graph.
     Double(PartialRelations),
 }
 
 impl PartialStore {
+    /// Empty storage, for the double large prime variation if `use_dlp` is set.
     pub fn new(use_dlp: bool) -> PartialStore {
         if use_dlp {
             PartialStore::Double(PartialRelations::new())
@@ -66,13 +68,11 @@ impl PartialStore {
         }
     }
 
-    /// Feed a partial relation (with exactly one large prime in the single-prime
-    /// path). Returns the combined relation once it completes a full relation,
-    /// otherwise stores it and returns None.
+    /// Adds a partial relation, with exactly one large prime for
+    /// [`PartialStore::Single`]. Returns the full relation it completes, if any;
+    /// otherwise the partial is stored.
     pub fn add(&mut self, mut relation: Relation) -> Option<Relation> {
         match self {
-            // original single-large-prime hash map: two partials sharing the prime
-            // combine into a full relation; the first one is kept as the match.
             PartialStore::Single(map) => {
                 let prime = relation.large_primes.pivot();
                 debug_assert_eq!(relation.large_primes, LargePrimes::one(prime));

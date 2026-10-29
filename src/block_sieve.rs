@@ -3,14 +3,17 @@ use crate::polynomial_generator::Roots;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Cumulative sieve-internal phase times across all threads (nanoseconds), only
-/// accumulated when SIQS_PROFILE is set: bucket fill + carry-position setup vs the
-/// add/drain block loop, and the number of sieve calls. Read by the producer's
-/// profile report to break down where the sieve pass spends its time.
-pub static SIEVE_SETUP_NANOS: AtomicU64 = AtomicU64::new(0);
-pub static SIEVE_LOOP_NANOS: AtomicU64 = AtomicU64::new(0);
-pub static SIEVE_CALLS: AtomicU64 = AtomicU64::new(0);
+/// Nanoseconds that [`sieve_over_factorbase_blocked`] spent filling the buckets and
+/// setting up the carry positions, summed over all threads. Like the next two
+/// counters, it is only accumulated if `SIQS_PROFILE` is set, for the profile report
+/// of the sieving threads.
+pub(crate) static SIEVE_SETUP_NANOS: AtomicU64 = AtomicU64::new(0);
+/// Nanoseconds that [`sieve_over_factorbase_blocked`] spent in its block loop.
+pub(crate) static SIEVE_LOOP_NANOS: AtomicU64 = AtomicU64::new(0);
+/// The number of calls of [`sieve_over_factorbase_blocked`].
+pub(crate) static SIEVE_CALLS: AtomicU64 = AtomicU64::new(0);
 
+/// Whether `SIQS_PROFILE` is set.
 fn sieve_profile_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("SIQS_PROFILE").is_ok())
@@ -72,31 +75,21 @@ unsafe fn push_hit(data: *mut u32, ends: *mut usize, block: usize, entry: u32) {
     }
 }
 
-/// Blocked (segmented) version of the sieve which reuses `logs_for_polynomial`
-/// and processes the sieve window in cache‑friendly blocks of `block_size`.
+/// Sieves one polynomial over the interval [−M, M), M = `sieve_interval_length`:
+/// position i of `logs_for_polynomial` stands for x = i − M and receives the sum of
+/// `logs[j]` over the roots r of the polynomial modulo `factorbase[j]` with x ≡ r,
+/// for every j from [`NUM_SKIP_PRIMES`] on. Returns the sum of the logs of the
+/// skipped primes, which the threshold has to account for.
 ///
-/// Primes are split at `block_size`:
-/// - **Small primes** (`p <= block_size`) hit every block one or more times, so they
-///   are carry‑sieved per block — the hit position is walked forward and remembered
-///   in `next_pos` across blocks.
-/// - **Large primes** (`p > block_size`) hit a given block at most once, so iterating
-///   them per block (as a plain blocked sieve does) wastes a read/compare/write‑back
-///   on every non‑hitting block. Instead each of their (few) hits is *bucketed* into
-///   the block it lands in; a block then just drains its bucket. This turns the
-///   large‑prime cost from O(num_blocks · num_large_primes) into O(num_large_hits).
+/// The interval is sieved in blocks of `block_size` positions, a power of two, so
+/// that a block stays in the cache; a `block_size` of at least 2M gives one block.
+/// A prime up to `block_size` hits every block, so it is walked through each block
+/// from where the previous block left off. A larger prime hits a block at most once
+/// per root, so its hits are sorted into one bucket per block first, which the block
+/// then drains: this costs a step per hit instead of one per prime and block.
 ///
-/// - `sieve_interval_length`: half the window length (total_len = 2 * sieve_interval_length)
-/// - `factorbase`, `roots`, `logs`: same layout as existing code; `factorbase` sorted ascending
-/// - `logs_for_polynomial`: caller‑owned buffer with length == 2 * sieve_interval_length
-/// - `scratch`: caller‑owned, reused across calls: the carry positions for the small
-///   primes, and one bucket per block for the large primes, each entry a packed
-///   `position | log << 24` word (total_len < 2^24, which the largest tabulated sieve
-///   size satisfies). Halving the entry size keeps the fill's write traffic — the
-///   bulk of the sieve setup — cache-resident longer. Contents are reset each call.
-/// - `block_size`: block size in elements, a power of two (positions map to blocks by
-///   a shift); one larger than the window gives a single block
-///
-/// Returns sum of small logs (same as other variants).
+/// `factorbase` is sorted ascending, and `roots` and `logs` belong to its primes.
+/// `logs_for_polynomial` has length 2M < 2^24, and `scratch` is reused across calls.
 pub fn sieve_over_factorbase_blocked(
     sieve_interval_length: usize,
     factorbase: &[u32],
@@ -111,7 +104,6 @@ pub fn sieve_over_factorbase_blocked(
     debug_assert_eq!(factorbase.len(), logs.len());
     let total_len = 2usize * sieve_interval_length;
     debug_assert_eq!(logs_for_polynomial.len(), total_len);
-    // reset buffer (reuse instead of reallocating)
     logs_for_polynomial.fill(0);
 
     assert!(
@@ -121,9 +113,8 @@ pub fn sieve_over_factorbase_blocked(
     let block_shift = block_size.trailing_zeros();
     let num_blocks = total_len.div_ceil(block_size);
 
-    // factorbase is sorted ascending, so primes <= block_size form a prefix. Skip the
-    // first NUM_SKIP_PRIMES entries (-1 sentinel, 2, and the directly trial‑divided
-    // small primes), the same as the per-prime loops below.
+    // factorbase is sorted ascending, so the primes up to block_size form a prefix,
+    // [ns, split) after the skipped primes
     let ns = NUM_SKIP_PRIMES.min(factorbase.len());
     let split = factorbase
         .partition_point(|&p| (p as usize) <= block_size)
@@ -132,12 +123,14 @@ pub fn sieve_over_factorbase_blocked(
     let profile = sieve_profile_enabled();
     let prof_t0 = profile.then(std::time::Instant::now);
 
-    // --- bucket the large primes (p > block_size): one entry per hit ---
+    // --- bucket the hits of the large primes (p > block_size) ---
     // each root of a prime larger than a block hits that block at most once
     buckets.reset(num_blocks, 2 * (factorbase.len() - split));
     let data = buckets.data.as_mut_ptr();
     let ends = buckets.ends.as_mut_ptr();
-    // the packed entry holds the position in 24 bits and the log in the top 8
+    // An entry packs the position into its low 24 bits and the log into the high 8:
+    // 4 bytes instead of 8 for a separate position and log keep the fill's writes,
+    // the bulk of the setup, in the cache longer.
     debug_assert!(total_len < (1 << 24));
     for (((&p, &root1), &root2), &log) in factorbase[split..]
         .iter()
@@ -326,8 +319,8 @@ mod tests {
         let total_len = 2 * sieve_interval_length;
         let mut scratch = SieveScratch::default();
         // block sizes that are tiny (many blocks), that don't divide total_len, and
-        // that exceed total_len (single block) — every prime above the size goes to
-        // the buckets.
+        // that exceed total_len (single block): every prime above the size goes to
+        // the buckets
         for &block_size in &[8usize, 16, 64, 256, 512, 1024, 4096] {
             let mut buf = vec![0u8; total_len];
             sieve_over_factorbase_blocked(

@@ -83,10 +83,10 @@ fn main() {
     let n_r = rows.len();
     println!("loaded {n_r} relations x {n_f} columns");
 
-    // SIQS_FILTER=1: iteratively remove singleton relations (those containing a prime
-    // that appears in exactly one surviving relation — such a relation can never be
-    // part of a dependency, since nothing can cancel that prime), then run Block
-    // Lanczos on the filtered matrix.
+    // SIQS_FILTER=1: remove the singleton relations, those containing a prime that
+    // appears in exactly one surviving relation, repeatedly, then run Block Lanczos on
+    // the filtered matrix. A singleton relation cannot be part of a dependency, since
+    // nothing can cancel that prime.
     if std::env::var("SIQS_FILTER").is_ok() {
         let mut alive: Vec<bool> = vec![true; rows.len()];
         let mut round = 0usize;

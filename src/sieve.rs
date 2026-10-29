@@ -23,18 +23,16 @@ use crate::trial_division::TrialDivision;
 /// thread, with the index of the sieving thread.
 type RelationMsg = (Relation, usize);
 
-/// Slack multiplier for the sieve threshold, in units of the large-prime bound's
-/// log — `log2(large_prime_multiplier · p_max)`, the size of the biggest admissible
-/// large prime. So 1.0 admits every single-large-prime partial and 2.0 every
-/// double-large-prime cofactor, independent of the factor-base size or the
-/// large-prime multiplier in use.
+/// The slack of the sieve threshold, in units of log2(`large_prime_multiplier` ·
+/// p_max), the size of the largest admissible large prime: 1.0 admits every partial
+/// with one large prime and 2.0 every cofactor of two, independent of the factor base
+/// size and the large-prime multiplier.
 ///
-/// Defaults are measured optima: 0.75 without the double large prime variation
-/// (measured at 202 bits). With it, the optimum grows with the size of N (larger
-/// non-smooth cofactors make partials more valuable): ~0.72 measured at 251 bits,
-/// ~1.15 at ~300 bits (the old-default equivalent; finer sweep pending), linearly
-/// interpolated in between and clamped outside. Overridable via the
-/// `SIQS_LP_SLACK` env var (e.g. `SIQS_LP_SLACK=1.5`) for parameter sweeps.
+/// The default is 0.75 without the double large prime variation, measured as the
+/// optimum at 202 bits. With it, the optimum grows with n, since larger cofactors make
+/// partials more valuable: 0.72 measured at 251 bits, and 1.15, not yet tuned, at 300
+/// bits, interpolated linearly in between and clamped outside. `SIQS_LP_SLACK`
+/// overrides it, e.g. `SIQS_LP_SLACK=1.5`, for parameter sweeps.
 fn lp_slack_multiplier(use_dlp: bool, n_bits: u32) -> f64 {
     static OVERRIDE: OnceLock<Option<f64>> = OnceLock::new();
     OVERRIDE
@@ -63,9 +61,8 @@ fn lp_slack_bits(use_dlp: bool, n_bits: u32, largest_log: u32, large_prime_multi
     (lp_slack_multiplier(use_dlp, n_bits) * lp_bound_log) as u32
 }
 
-/// A/B switch: set `SIQS_GLOBAL_THRESHOLD` to disable the per-block thresholds and
-/// use the single global `log2(kn/a)` bound for the whole interval (the pre-per-block
-/// behavior), for benchmarking the two strategies against each other.
+/// Whether `SIQS_GLOBAL_THRESHOLD` is set, which replaces the per-block thresholds by
+/// one for the whole interval, from log2(kn/a), to compare the two.
 fn use_global_threshold() -> bool {
     static GLOBAL: OnceLock<bool> = OnceLock::new();
     *GLOBAL.get_or_init(|| std::env::var("SIQS_GLOBAL_THRESHOLD").is_ok())
@@ -96,7 +93,7 @@ impl SieveParams {
         let k = compute_multiplier(n)?;
         info!("k = {k}");
         let kn: Integer = n.clone() * k;
-        // heuristic value for the factor base
+        // the parameters for the size of kn
         let log2_kn = (kn.significant_bits() + 1) as usize;
         let (factorbase_size, sieve_interval_length, large_prime_multiplier) =
             compute_sieve_parameters(log2_kn);
@@ -115,7 +112,7 @@ impl SieveParams {
         let logs = compute_logs(&factorbase);
         // Barrett reciprocals for the resieve step's per-prime `x mod p`.
         let reciprocals = compute_reciprocals(&factorbase);
-        // double large prime variation: only worthwhile for larger N, where non-smooth
+        // double large prime variation: only worthwhile for larger n, where non-smooth
         // cofactors are big enough that admitting two large primes pays for the extra
         // primality test / Pollard-rho split and the larger partial-relation graph.
         let n_bits = n.significant_bits();
@@ -146,7 +143,7 @@ impl SieveParams {
         })
     }
 
-    // one polynomial generator per sieving thread
+    /// One polynomial generator per sieving thread.
     fn polynomial_generators(&self, num_threads: usize) -> Vec<SIQSPolynomialData<'_>> {
         new_polynomial_generators(
             &self.kn,
@@ -214,7 +211,7 @@ fn run_sieve_producer(
             &mut sieve_scratch,
             BLOCK_SIZE,
         );
-        // Per-block thresholds: log2|Q(x)| is not flat over the interval — it is
+        // Per-block thresholds: log2|Q(x)| is not flat over the interval. It is
         // ≈ log2(kn/a) over most of it but dips near the two roots of Q at
         // x ≈ ±M/√2, where smooth values are both likelier and cheaper. A single
         // threshold derived from the maximum misses those, so evaluate |Q| at each
@@ -234,9 +231,9 @@ fn run_sieve_producer(
             let block_end = (block_start + SCAN_BLOCK).min(total);
             let x_mid = (block_start + block_end) as f64 / 2.0 - sieve_interval_length as f64;
             let q_mid = (a_f * x_mid + 2.0 * b_f) * x_mid + c_f;
-            // fall back to the global bound if the A/B switch disables per-block
-            // thresholds, if f64 overflowed (kn beyond ~2^1020), or the midpoint
-            // sits implausibly close to a root of Q
+            // fall back to the global bound if SIQS_GLOBAL_THRESHOLD is set, if f64
+            // overflowed (kn beyond ~2^1020), or if the midpoint sits implausibly
+            // close to a root of Q
             let q_bits = if !use_global_threshold() && q_mid.is_finite() && q_mid.abs() >= 2.0 {
                 q_mid.abs().log2() as u32
             } else {
@@ -451,7 +448,7 @@ fn collect_relations(
     // full relations collected sparsely for the batch linear algebra
     let mut sparse = SparseRelations::new(factorbase_size);
     // which factor-base primes have actually appeared: the matrix only needs a
-    // surplus over *these*, not over the full factor base (for small N most large
+    // surplus over these, not over the full factor base (for small n most large
     // primes never divide any Q(x)).
     let mut appeared = vec![false; factorbase_size];
     let mut appeared_count = 0usize;

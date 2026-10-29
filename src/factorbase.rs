@@ -1,16 +1,17 @@
 use crate::number_theory::square_root_mod_p;
 use rug::Integer;
 
-// compute factor base for n with size size
+/// The factor base of `size` entries for n: 0, which stands for −1, then 2 and the
+/// smallest odd primes p with (n/p) = 1. Apart from the primes dividing n, these are
+/// the only odd primes that divide numbers y² − n.
 pub fn make_factorbase(n: &Integer, size: usize) -> Vec<u32> {
-    let mut factorbase = Vec::with_capacity(size); // we know how many elements our result will have
-    factorbase.push(0); // 0 stands for -1
+    let mut factorbase = Vec::with_capacity(size);
+    factorbase.push(0);
     factorbase.push(2);
     let mut p = Integer::from(2);
     for _ in 2..size {
         p = p.next_prime();
         while n.legendre(&p) != 1 {
-            // note that the discriminant of our polynomials will be n
             p = p.next_prime();
         }
         factorbase.push(p.to_u32().unwrap());
@@ -18,11 +19,10 @@ pub fn make_factorbase(n: &Integer, size: usize) -> Vec<u32> {
     factorbase
 }
 
-// Precompute a Barrett reciprocal m = floor(2^64 / p) for each factor-base prime,
-// so the resieve step can compute `x mod p` with a multiply+shift instead of a
-// hardware division (see `x_mod_p` in trial_division.rs). Entries for the -1 / sentinel
-// slot (p < 2) are 0 and never used: the resieve only touches indices >=
-// NUM_SKIP_PRIMES, where every prime is well above 2.
+/// The Barrett reciprocals floor(2^64 / p) of the factor-base primes, with which trial
+/// division computes x mod p by a multiplication and a shift instead of a division.
+/// The entry for −1 is 0; trial division reads only those from
+/// [`NUM_SKIP_PRIMES`](crate::constants::NUM_SKIP_PRIMES) on.
 pub fn compute_reciprocals(factorbase: &[u32]) -> Vec<u64> {
     factorbase
         .iter()
@@ -36,7 +36,8 @@ pub fn compute_reciprocals(factorbase: &[u32]) -> Vec<u64> {
         .collect()
 }
 
-// compute rounded log_2(p) as u8 for p in the factor base
+/// The logs of the factor-base primes, log2 p rounded to the nearest integer, and 0
+/// for −1.
 pub fn compute_logs(factorbase: &[u32]) -> Vec<u8> {
     std::iter::once(0u8) // log_2|-1|
         .chain(
@@ -48,13 +49,14 @@ pub fn compute_logs(factorbase: &[u32]) -> Vec<u8> {
         .collect()
 }
 
-// compute the sqrt(n) (mod p) for p in the factor base
+/// A square root of n modulo each odd factor-base prime, in [0, p), and the unused
+/// placeholders 0 for −1 and 1 for 2. Panics if n is not a square modulo one of the
+/// odd primes.
 pub fn square_roots_mod_factorbase(n: &Integer, factorbase: &[u32]) -> Vec<u32> {
-    let mut square_roots = Vec::with_capacity(factorbase.len()); // we know how many elements our result will have
-    square_roots.push(0); // p = -1
-    square_roots.push(1); // p = 2
+    let mut square_roots = Vec::with_capacity(factorbase.len());
+    square_roots.push(0);
+    square_roots.push(1);
     for p in factorbase.iter().skip(2) {
-        // skip 1, 2
         square_roots.push(
             square_root_mod_p(n, &Integer::from(*p))
                 .unwrap()

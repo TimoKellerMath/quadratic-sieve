@@ -1,17 +1,17 @@
 use std::fmt::{self, Debug};
 
-//use rug::ops::SubFrom;
-//use num_traits::{Zero};
 use rug::integer::IsPrime;
 use rug::{Complete, Integer};
-//use rug::ops::DivRounding;
 
+/// The errors of the number theory functions and of the factorization.
 #[derive(Debug, Clone)]
 pub enum NumberTheoryError {
+    /// An even number where an odd prime is needed.
     IsEven(Integer),
+    /// Two numbers that are not coprime, such as n and a small prime factor of it.
     NotCoprime(Integer, Integer),
+    /// A number and a prime modulo which it is not a square.
     IsNonsquare(Integer, Integer),
-    AlgorithmFailed,
     /// A prime, or a number below 2, given to be factored.
     NotComposite(Integer),
 }
@@ -22,7 +22,6 @@ impl fmt::Display for NumberTheoryError {
             NumberTheoryError::IsEven(a) => write!(f, "{a} is even"),
             NumberTheoryError::NotCoprime(a, b) => write!(f, "gcd({a}, {b}) != 1"),
             NumberTheoryError::IsNonsquare(a, p) => write!(f, "{a} not a square mod {p}"),
-            NumberTheoryError::AlgorithmFailed => write!(f, "algorithm failed"),
             NumberTheoryError::NotComposite(a) => write!(f, "{a} is not composite"),
         }
     }
@@ -30,7 +29,7 @@ impl fmt::Display for NumberTheoryError {
 
 impl std::error::Error for NumberTheoryError {}
 
-// all primes <= 1000
+/// The primes below 1000.
 pub const SMALL_PRIMES: [u32; 168] = [
     2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
     101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193,
@@ -182,27 +181,26 @@ fn miller_rabin(n: u64, witnesses: &[u64]) -> bool {
     true
 }
 
-// Deterministic primality test for n < 2^64. The witness set
-// {2,3,5,7,11,13,17,19,23,29,31,37} is known to be correct for all n < 3.3 * 10^24.
+/// Whether n is prime, by Miller–Rabin with the bases 2, 3, 5, …, 37, which is exact
+/// for n < 3.3 · 10^24, so for every `u64`.
 pub fn is_prime_u64(n: u64) -> bool {
     const WITNESSES: [u64; 12] = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37];
     miller_rabin(n, &WITNESSES)
 }
 
-// Deterministic primality test for n < 2^32. The witness set {2, 7, 61} is known
-// to be correct for all n < 4,759,123,141 > 2^32, so only three rounds are needed
-// — cheaper than the full 2^64 set when the input is known to fit in 32 bits.
+/// Whether n < 2^32 is prime, by Miller–Rabin with the bases 2, 7 and 61, which is
+/// exact for n < 4,759,123,141: three rounds instead of the twelve of
+/// [`is_prime_u64`].
 pub fn is_prime_u32(n: u64) -> bool {
     debug_assert!(n < 1u64 << 32);
     const WITNESSES: [u64; 3] = [2, 7, 61];
     miller_rabin(n, &WITNESSES)
 }
 
-// Single strong-probable-prime round to base 2 for odd n > 2. A `false` result
-// means base 2 is a Miller–Rabin witness, which is a *certificate* that n is
-// composite; `true` means n is only a probable prime. Used to cheaply reject the
-// common single-prime cofactor before attempting a Pollard-rho split (which would
-// not terminate on a prime): one modular exponentiation instead of a full test.
+/// Whether the odd n > 2 is a strong probable prime to base 2, by one modular
+/// exponentiation. `false` proves that n is composite, so that [`pollard_rho_u64`],
+/// which does not terminate on a prime, can split it; `true` means that n is probably
+/// prime.
 pub fn is_probable_prime_base2(n: u64) -> bool {
     debug_assert!(n & 1 == 1 && n > 2);
     let mont = Montgomery::new(n);
@@ -226,15 +224,13 @@ pub fn is_probable_prime_base2(n: u64) -> bool {
     false
 }
 
-// Pollard's rho: return a non-trivial divisor of the composite, odd `n`.
-// Used to split a double-large-prime cofactor (a product of two ~30-bit primes)
-// into its two prime factors; for such semiprimes this returns one of them.
-//
-// Brent's variant of the cycle search (one f-evaluation per step instead of
-// Floyd's three) with the gcd batched: the per-step differences are accumulated
-// into a single Montgomery product and only `gcd(product, n)` is taken once per
-// `BATCH` steps. gcd(product, n) is unchanged by the Montgomery form because
-// gcd(R, n) = 1, so the returned divisor is a genuine factor of n.
+/// A nontrivial divisor of the composite n, by Pollard's rho method; for a product of
+/// two primes, one of them. Does not terminate if n is prime.
+///
+/// It uses Brent's cycle search, with one evaluation of f per step instead of
+/// Floyd's three, and batches the gcds: the differences of 128 steps are multiplied
+/// in Montgomery form, and only then is the gcd with n taken. The Montgomery form,
+/// with the factor 2^64, does not change the gcd for odd n.
 pub fn pollard_rho_u64(n: u64) -> u64 {
     if n & 1 == 0 {
         return 2;
@@ -273,7 +269,7 @@ pub fn pollard_rho_u64(n: u64) -> u64 {
         if d == n {
             // a batch product hit all of n (the cycle closed within it): re-walk the
             // last batch one step at a time to isolate which difference carried the
-            // factor. If even that yields n, this c failed — bump it and retry.
+            // factor. If even that yields n, this c failed: increment it and retry.
             loop {
                 ys = f(ys);
                 let diff = x.abs_diff(ys);
@@ -290,13 +286,13 @@ pub fn pollard_rho_u64(n: u64) -> u64 {
     }
 }
 
-// compute a^2 (mod p)
+/// a² mod p.
 #[inline]
 pub fn square_mod_p(a: &Integer, p: &Integer) -> Integer {
     a.square_ref().complete() % p
 }
 
-// modular inverse of a mod p for prime p (or None if p | a); a must be < 2^31
+/// The inverse of a < p modulo p, or `None` if a and p are not coprime.
 #[inline]
 pub fn modular_inverse_u32(a: u32, p: u32) -> Option<u32> {
     if a == 0 {
@@ -324,7 +320,7 @@ pub fn modular_inverse_u32(a: u32, p: u32) -> Option<u32> {
     Some(t as u32)
 }
 
-// compute (a_,k) with a = a_ 2^k, a_ odd (or (0,0) if a == 0)
+/// The odd part m of a and the exponent k with a = m 2^k, or (0, 0) for a = 0.
 pub fn factor_out_power_of_2(a: &Integer) -> (Integer, u32) {
     let k = match a.find_one(0) {
         Some(k) => k,
@@ -335,14 +331,15 @@ pub fn factor_out_power_of_2(a: &Integer) -> (Integer, u32) {
     (a_, k)
 }
 
-// compute a quadratic non-residue mod p
+/// A quadratic non-residue modulo the odd prime p: −1 if p ≡ 3 (mod 4), otherwise
+/// the smallest prime below 1000 that is one, or else the smallest one above 997. An
+/// error if p is even.
 pub fn quadratic_non_residue_mod_p(p: &Integer) -> Result<Integer, NumberTheoryError> {
     if p.is_even() {
         return Err(NumberTheoryError::IsEven(p.clone()));
     }
     if p.get_bit(1) {
-        // p = 3 (4) =>
-        return Ok(Integer::from(-1)); // -1 is a quadratic non-residue
+        return Ok(Integer::from(-1));
     }
     let mut a;
     for q in SMALL_PRIMES {
@@ -360,8 +357,8 @@ pub fn quadratic_non_residue_mod_p(p: &Integer) -> Result<Integer, NumberTheoryE
     }
 }
 
-// compute square root of a (mod p)
-// using the Shanks--Tonelli algorithm
+/// A square root of a modulo the prime p, by the Tonelli–Shanks algorithm, reduced
+/// modulo p if p is odd. An error if a is not a square modulo p.
 pub fn square_root_mod_p(a: &Integer, p: &Integer) -> Result<Integer, NumberTheoryError> {
     debug_assert_eq!(p.is_probably_prime(10), IsPrime::Yes);
     if *p == 2 {
@@ -423,24 +420,22 @@ pub fn square_root_mod_p(a: &Integer, p: &Integer) -> Result<Integer, NumberTheo
     Ok(square_root)
 }
 
-// Input: sqrt_mod_q^2 = x (mod q)
-// Assume: gcd(2 * sqrt_mod_q, q) = 1
-// Output: a^2 = x (mod q^2)
+/// Lifts a square root s of x modulo q > 2 to the square root (s² + x) / (2 s) of x
+/// modulo q², by one Newton step. An error if 2 s is not invertible modulo q².
 pub fn lift_square_root_mod_q2(
     x: &Integer,
     sqrt_mod_q: &Integer,
     q: &Integer,
 ) -> Result<Integer, NumberTheoryError> {
     debug_assert!(q > &Integer::from(2));
-    //debug_assert!((sqrt_mod_p.clone().square() - x).is_divisible(&p));
+    debug_assert!((sqrt_mod_q.square_ref().complete() - x).is_divisible(q));
     let q_square = q.square_ref().complete();
+    // a = (2s)^-1 (mod q^2)
     let mut a: Integer = (sqrt_mod_q << 1u32).complete();
-    match a.invert_mut(&q_square) {
-        // a = (2s)^-1 (mod p^2)
-        Ok(()) => (),
-        Err(_) => return Err(NumberTheoryError::NotCoprime(a, q_square)),
+    if a.invert_mut(&q_square).is_err() {
+        return Err(NumberTheoryError::NotCoprime(a, q_square));
     }
-    let sqrt_mod_q2 = ((sqrt_mod_q.square_ref() + x).complete() * a) % q_square; // S = (s^2 + x)/(2s) (mod p^2)
+    let sqrt_mod_q2 = ((sqrt_mod_q.square_ref() + x).complete() * a) % q_square;
     Ok(sqrt_mod_q2)
 }
 
@@ -531,12 +526,10 @@ mod tests {
         let mut p = Integer::from(2);
         for _ in 0..100 {
             p = p.next_prime();
-            //println!("p = {p}:");
             let mut num_squares_mod_p = 0;
             let mut num_nonsquares_mod_p = 0;
             for a in 1..p.to_i32().unwrap() {
                 let root = square_root_mod_p(&Integer::from(a), &p);
-                //println!("{root:?}");
                 match root {
                     Ok(_) => num_squares_mod_p += 1,
                     Err(NumberTheoryError::IsNonsquare(_, _)) => num_nonsquares_mod_p += 1,
@@ -546,11 +539,6 @@ mod tests {
             assert_eq!(num_squares_mod_p, p.clone() >> 1);
             assert_eq!(num_nonsquares_mod_p, p.clone() >> 1);
         }
-        //let a = Integer::from_str("680564733841876926926749214863536422913").unwrap();
-        //let p = Integer::from_str("16777217").unwrap(); // Carmichael number!
-        //assert_eq!(p.is_probably_prime(10), IsPrime::No);
-        //let x = square_mod_p(&a, &p);
-        //assert_eq!(x.square() % p, a);
     }
 
     #[test]

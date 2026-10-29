@@ -1,25 +1,15 @@
-//! Linear-algebra phase: collect relations as a sparse GF(2) matrix and solve for
-//! dependencies (subsets of relations whose product over the factor base is a
-//! square) with Block Lanczos.
-//!
-//! [`dense_left_null_space`] is a straightforward dense GF(2) elimination. It is
-//! O(R · F · R / 64) and meant as a correctness *oracle* — a reference the Block
-//! Lanczos implementation must agree with — and as its last-resort fallback, not as
-//! the production solver.
-
 use fixedbitset::FixedBitSet;
 use log::{info, warn};
 use rayon::prelude::*;
 use rug::Integer;
 
-/// Relations stored sparsely for the batch linear-algebra phase: each relation keeps
-/// only the factor-base column indices with odd exponent (its GF(2) row), together
-/// with the `(u, v)` pair needed to recover a factor from a dependency, where
-/// `u^2 ≡ v (mod n)`.
+/// The full relations as a sparse matrix over GF(2), whose columns are the factor-base
+/// primes. The row of a relation lists the indices of the primes with an odd exponent,
+/// and the relation keeps its pair (u, v) with u² ≡ v (mod n), from which a dependency
+/// gives a factor.
 ///
-/// A row of average weight `w` costs `w` `u32`s instead of the `F/8` bytes of a
-/// dense bit row, which is the difference between a few MB and ~1 GB at the largest
-/// sizes.
+/// A row of weight w takes w `u32`s instead of the F/8 bytes of a dense row over F
+/// primes: a few MB instead of about 1 GB for the largest factor bases.
 pub struct SparseRelations {
     num_columns: usize,
     rows: Vec<Vec<u32>>,
@@ -27,6 +17,7 @@ pub struct SparseRelations {
 }
 
 impl SparseRelations {
+    /// An empty matrix with `num_columns` columns.
     pub fn new(num_columns: usize) -> SparseRelations {
         SparseRelations {
             num_columns,
@@ -35,45 +26,48 @@ impl SparseRelations {
         }
     }
 
-    /// Append a relation already in sparse column form.
+    /// Appends a relation, given by the column indices of its row and its pair (u, v).
     pub fn push_sparse(&mut self, columns: Vec<u32>, uv: (Integer, Integer)) {
         debug_assert!(columns.iter().all(|&c| (c as usize) < self.num_columns));
         self.rows.push(columns);
         self.uvs.push(uv);
     }
 
+    /// The number of relations.
     pub fn len(&self) -> usize {
         self.rows.len()
     }
 
+    /// Whether there are no relations.
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
 
+    /// The number of columns.
     pub fn num_columns(&self) -> usize {
         self.num_columns
     }
 
+    /// The rows, one per relation.
     pub fn rows(&self) -> &[Vec<u32>] {
         &self.rows
     }
 
-    /// A basis of the left null space over GF(2): every returned entry is a set of
-    /// relation indices whose rows XOR to the zero vector (i.e. the product of their
-    /// `v`s is a perfect square). Uses the dense reference solver.
+    /// A basis of the left null space over GF(2), by the dense
+    /// [`dense_left_null_space`]: each dependency is a set of relation indices whose
+    /// rows XOR to zero, so that the product of their v is a square.
     pub fn dependencies(&self) -> Vec<Vec<usize>> {
         dense_left_null_space(&self.rows, self.num_columns)
     }
 
-    /// Recover a factor of `n` from one dependency (a subset of relation indices),
-    /// or `None` if it yields a trivial gcd (see [`crate::square_root::find_factor`]).
+    /// The factor of n that a dependency, a set of relation indices, gives by
+    /// [`crate::square_root::find_factor`], or `None` if the gcd is trivial.
     pub fn find_factor(&self, dependency: &[usize], n: &Integer) -> Option<Integer> {
         crate::square_root::find_factor(dependency.iter().map(|&j| &self.uvs[j]), n)
     }
 }
 
-/// XOR row `src` into row `dst` (`src < dst`) of a `&mut [FixedBitSet]`, taking the
-/// two disjoint borrows the borrow checker needs.
+/// XORs row `src` into row `dst`, for `src < dst`, by two disjoint borrows.
 #[inline]
 fn xor_row_into(rows: &mut [FixedBitSet], dst: usize, src: usize) {
     debug_assert!(src < dst);
@@ -81,19 +75,19 @@ fn xor_row_into(rows: &mut [FixedBitSet], dst: usize, src: usize) {
     tail[0] ^= &head[src];
 }
 
-/// Dense GF(2) left null-space basis.
-///
-/// Given `rows` over `num_columns` factor-base columns, returns every independent
-/// subset of row indices whose rows XOR to the zero vector. The number returned is
-/// exactly `rows.len() - rank`.
+/// A basis of the left null space over GF(2) of the matrix with the given `rows` over
+/// `num_columns` columns, by dense Gaussian elimination: `rows.len()` minus the rank
+/// many sets of row indices whose rows XOR to zero. It takes O(R F (R + F) / 64) time
+/// for R rows and F columns, so it serves as the reference for Block Lanczos and as
+/// its last resort.
 ///
 /// Each working row carries a `num_columns`-bit column part and a `rows.len()`-bit
 /// tracking part recording which original rows have been combined into it. Rows are
 /// reduced against registered pivots until they either acquire a fresh pivot column
 /// or vanish; a vanished column part means the tracking part is a dependency. Pivot
 /// rows, once registered, are never modified and their lowest set column is their
-/// pivot column, so each reduction strictly raises a row's lowest set column —
-/// guaranteeing termination.
+/// pivot column, so each reduction strictly raises a row's lowest set column, which
+/// guarantees termination.
 pub fn dense_left_null_space(rows: &[Vec<u32>], num_columns: usize) -> Vec<Vec<usize>> {
     let num_rows = rows.len();
     // column parts
@@ -149,8 +143,8 @@ pub fn dense_left_null_space(rows: &[Vec<u32>], num_columns: usize) -> Vec<Vec<u
 // ===========================================================================
 // Block Lanczos over GF(2) (Montgomery 1995).
 //
-// Finds vectors in the kernel of the relation matrix B (a 64-wide block at a time),
-// i.e. subsets of relations whose rows XOR to zero — the same output as
+// Finds vectors in the kernel of the relation matrix B, a 64-wide block at a time,
+// that is, subsets of relations whose rows XOR to zero: the same output as
 // `dense_left_null_space`, but in O(weight · #relations / 64) per iteration instead
 // of the dense O(R²·F/64). Ported from the reference implementation at
 // github.com/SebWouters/blanczos (the recurrence and the selection/`invert` step in
@@ -348,8 +342,8 @@ fn nonzero_masked(x: &[u64], mask: u64) -> bool {
     x.iter().any(|&e| e & mask != 0)
 }
 
-// Invert the largest invertible principal submatrix of the symmetric `t` = Vᵢᵀ A Vᵢ,
-// writing the (masked) inverse into `right` and using `left` as scratch. Columns NOT
+// Inverts the largest invertible principal submatrix of the symmetric `t` = Vᵢᵀ A Vᵢ,
+// writing the (masked) inverse into `right` and using `left` as scratch. Columns not
 // selected in the previous iteration (mask bit 0) get pivot priority, so every column
 // is selected within two consecutive iterations. Returns the new selection mask.
 fn invert(t: &Mat, mask: u64, left: &mut Mat, right: &mut Mat) -> u64 {
@@ -517,9 +511,9 @@ fn build_transpose(rows: &[Vec<u32>], n_f: usize) -> Vec<Vec<u32>> {
     cols_to_rows
 }
 
-// Run the Block Lanczos iteration and return the raw blocks (X, V0), each a length-n_r
-// array of 64-bit columns. `A·X = 0` (X spans up to 64 vectors of ker(A)). Returns
-// None on the inner breakdown.
+// Runs the Block Lanczos iteration and returns the raw blocks (X, V0), each a
+// length-n_r array of 64-bit columns, with A·X = 0 (X spans up to 64 vectors of
+// ker(A)). Returns None on the inner breakdown.
 fn lanczos_iterate(
     rows: &[Vec<u32>],
     cols_to_rows: &[Vec<u32>],
@@ -566,9 +560,9 @@ fn lanczos_iterate(
     let mut left = [0u64; 64];
     let mut mask = u64::MAX;
 
-    // env-gated diagnostic: sum of selected columns per iteration = rank(A), so
-    // n_r - rank(A) = dim ker(A) — the quantity that decides whether a 64-wide
-    // block can capture the kernel at all.
+    // SIQS_BL_DEBUG: the selected columns over all iterations add up to rank(A), so
+    // n_r - rank(A) = dim ker(A), which decides whether a 64-wide block can capture
+    // the kernel at all
     let debug = std::env::var("SIQS_BL_DEBUG").is_ok();
     let mut rank_a = 0usize;
 
@@ -639,16 +633,15 @@ fn lanczos_iterate(
     Some((x, v0))
 }
 
-/// Block Lanczos over GF(2): returns a set of dependencies (each a subset of relation
-/// indices whose rows XOR to the zero vector), the same contract as
-/// [`dense_left_null_space`]. Up to 64 independent dependencies are returned per call.
+/// Up to 64 independent dependencies among `rows` over `num_columns` columns, by Block
+/// Lanczos over GF(2) (Montgomery 1995): sets of row indices whose rows XOR to zero,
+/// like those of [`dense_left_null_space`]. `None` if the iteration breaks down.
 ///
-/// `seed` randomizes the starting block (Montgomery's algorithm is randomized); a
-/// fixed seed makes the result reproducible. Returns `None` if the inner breakdown
-/// occurs; `Some(deps)` otherwise. Caveat: when `dim ker(BᵀB) > 64` (a large GF(2)
-/// isotropic radical), the 64-wide block can land entirely in the isotropic part and
-/// the result is empty even though `ker(B)` is nonzero — retries do not help; the
-/// matrix needs filtering or a wider block.
+/// `seed` determines the random starting block, so a fixed seed gives a reproducible
+/// result. Let B be the transpose of the matrix, with a column per relation. If
+/// dim ker(BᵀB) > 64 (a large isotropic radical), the 64-wide block can land entirely
+/// in the isotropic part, and the result is empty even though ker(B) is not. Retries
+/// do not help then; the matrix needs filtering or a wider block.
 pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option<Vec<Vec<usize>>> {
     let n_r = rows.len();
     let n_f = num_columns;
@@ -677,11 +670,11 @@ pub fn block_lanczos(rows: &[Vec<u32>], num_columns: usize, seed: u64) -> Option
     Some(deps)
 }
 
-/// Iteratively drop relations containing a prime that appears in exactly one
-/// surviving relation. Such a relation can never participate in a dependency — its
-/// unique prime has nothing to cancel against — so the left null space is unchanged
-/// (inductively, as removals expose new singletons). Returns the indices of the
-/// surviving relations.
+/// Drops the relations containing a prime that appears in exactly one surviving
+/// relation, repeatedly, and returns the indices of the surviving relations. Such a
+/// relation cannot be part of a dependency, since its unique prime has nothing to
+/// cancel against, so the left null space is unchanged (inductively, as removals
+/// expose new singletons).
 ///
 /// This is not just a size optimization: singleton chains are exactly the structure
 /// that traps the 64-wide Block Lanczos block in the isotropic radical of BᵀB
@@ -715,21 +708,19 @@ fn filter_singletons(rows: &[Vec<u32>], num_columns: usize) -> Vec<u32> {
 }
 
 impl SparseRelations {
-    /// Dependencies via Block Lanczos (the production solver). Same contract as
-    /// [`SparseRelations::dependencies`] but O(weight·R/64) per iteration instead of
-    /// dense O(R²·F/64).
+    /// Dependencies like those of [`SparseRelations::dependencies`], but by
+    /// [`block_lanczos`], in O(weight · R / 64) per iteration for R relations, after
+    /// removing the relations that cannot be part of one.
     ///
-    /// Block Lanczos is randomized and can break down (or, near the 64-wide block
-    /// boundary, fail to capture the kernel) for an unlucky start vector — both are
-    /// resolved by retrying with a fresh seed. A nonzero kernel is guaranteed whenever
-    /// there are more relations than primes that actually appear (rank ≤ appearing
-    /// primes), so an empty result there is always a failure to retry, never a real
-    /// answer. After exhausting retries we fall back to the exact dense solver.
+    /// Block Lanczos can break down, or fail to capture the kernel near the 64-wide
+    /// block boundary, for an unlucky starting block; both are resolved by retrying
+    /// with another seed derived from `seed`. The kernel is nonzero whenever there are
+    /// more relations than primes appearing in them, so an empty result is then a
+    /// failure to retry. If all tries fail, the dense solver is the fallback.
     ///
-    /// The matrix–block products inside Block Lanczos run on a private rayon pool of
-    /// `num_threads` threads (so the solver's parallelism is independent of rayon's
-    /// global pool). The GF(2) reductions are associative, so the result is
-    /// bit-identical to a single-threaded run with the same seed.
+    /// The matrix-block products run on a rayon pool of their own with `num_threads`
+    /// threads. The reductions over GF(2) are associative, so the result is the same
+    /// as that of a single-threaded run with the same seed.
     pub fn dependencies_lanczos(&self, seed: u64, num_threads: usize) -> Vec<Vec<usize>> {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads.max(1))
@@ -738,12 +729,11 @@ impl SparseRelations {
         pool.install(|| self.dependencies_lanczos_pooled(seed))
     }
 
-    // The filter + retry loop; runs inside whatever rayon pool is installed by the
-    // caller.
+    // The filter and the retries, inside the rayon pool installed by the caller.
     fn dependencies_lanczos_pooled(&self, seed: u64) -> Vec<Vec<usize>> {
-        // Remove singleton relations first (see filter_singletons): they cannot be
-        // part of any dependency, and their chains are what traps the 64-wide block
-        // in the isotropic radical, making Lanczos return an empty kernel.
+        // Remove the singleton relations first (see filter_singletons): they cannot be
+        // part of any dependency, and their chains trap the 64-wide block in the
+        // isotropic radical, so that Block Lanczos returns an empty kernel.
         let keep = filter_singletons(&self.rows, self.num_columns);
         let filtered: Vec<Vec<u32>> = keep
             .iter()
@@ -789,9 +779,9 @@ impl SparseRelations {
                 None => breakdowns += 1,
             }
         }
-        // every attempt failed though a kernel must exist. The dense solver is exact
-        // but sequential O(R·F·(R+F)/64) — minutes at scale — so warn loudly and (when
-        // SIQS_DUMP_MATRIX is set) dump the matrix so the failure can be reproduced.
+        // Every attempt failed though a kernel must exist. The dense solver is exact
+        // but sequential and O(R·F·(R+F)/64), minutes at scale, so warn, and dump the
+        // matrix if SIQS_DUMP_MATRIX is set, so that the failure can be reproduced.
         warn!(
             "Block Lanczos failed in all {TRIES} attempts on a {}×{} matrix \
              ({breakdowns} breakdowns, {empties} empty); falling back to the SERIAL \
@@ -806,9 +796,9 @@ impl SparseRelations {
         Vec::new()
     }
 
-    // If the SIQS_DUMP_MATRIX env var is set, write the sparse rows to that path (one
-    // line per relation: space-separated column indices) so a failing Block Lanczos
-    // input can be captured and replayed in a test.
+    // If SIQS_DUMP_MATRIX is set, writes the rows to the file it names, a header line
+    // with the numbers of rows and columns and then one line of space-separated column
+    // indices per relation, so that a failing Block Lanczos input can be replayed.
     fn dump_matrix_if_requested(&self) {
         let Ok(path) = std::env::var("SIQS_DUMP_MATRIX") else {
             return;
@@ -1274,15 +1264,15 @@ mod tests {
             })
             .collect();
         for i in 0..50u32 {
-            // rows 320..370: each carries unique prime 300+i — removable round 1
+            // rows 320..370: each carries the unique prime 300 + i, removable in round 1
             let mut cols: Vec<u32> = (0..6).map(|_| (rng() % 300) as u32).collect();
             cols.push(300 + i);
             cols.sort_unstable();
             cols.dedup();
             rows.push(cols);
         }
-        // a 2-chain: row A has primes {350, 351}, row B has {351}; B's removal makes
-        // 350 a singleton only after A... (i.e. A has {398, 399}, B has {399, x})
+        // a chain: the first row holds the singleton 398, and once it is removed, 399
+        // is a singleton of the second
         rows.push(vec![5, 398, 399]);
         rows.push(vec![7, 399]);
 
@@ -1318,8 +1308,8 @@ mod tests {
     #[ignore = "needs src/bin/lanczos_matrix.txt (2MB dump of the failing 251-bit matrix)"]
     fn lanczos_real_251_bit_matrix_regression() {
         // The matrix on which unfiltered Block Lanczos returned an empty kernel for
-        // every start (isotropic-radical trap). With singleton filtering inside
-        // dependencies_lanczos this must now produce genuine dependencies, fast.
+        // every start (isotropic-radical trap). dependencies_lanczos, which filters
+        // the singletons, must find genuine dependencies on it, fast.
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/bin/lanczos_matrix.txt");
         let text = std::fs::read_to_string(path).expect("matrix dump present");
         let mut lines = text.lines();

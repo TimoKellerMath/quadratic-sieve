@@ -16,44 +16,63 @@ fn product_refu32_to_f32(vector: &[&u32]) -> f32 {
     vector.iter().map(|&&x| x as f32).product()
 }
 
-// one for each thread
+/// The polynomial generator of one sieving thread. It generates families of
+/// polynomials Q(x) = a x² + 2 b x + c with b² − a c = n, where all 2^(s−1)
+/// polynomials of a family share a = q² and q is a product of s factor-base primes:
+/// a combination of primes specific to the thread, which keeps the a of different
+/// threads apart, and further primes chosen so that a comes close to its ideal size
+/// √(2n) / M for the sieve interval [−M, M). Within a family, the roots modulo the
+/// factor base are updated by additions.
 pub struct SIQSPolynomialData<'a> {
     thread_number: usize,
-    s: usize,                          // #prime factors of q
-    thread_specific_factors: Vec<u32>, // fixed for each thread
+    // the primes of q: those specific to the thread and their product, the number s
+    // of further ones, and the number of all of them, which is the s of the docs
+    thread_specific_factors: Vec<u32>,
     prod_thread_specific_factors: Integer,
+    s: usize,
     num_factors: usize,
-    list_of_qis: Vec<Vec<u32>>, // successive choices of remaining qi's
-    num_a: usize,               // index of the next a in list_of_qis
-    bis: Vec<Integer>, // for i = 1..s: B[i] = a/q[i] * gamma, gamma = sqrt(n mod p) * (a/q[i])^-1 (mod q[i])
-    q_inv_mod_ps: Vec<Option<NonZeroU32>>, //  for all p \nmid a in factorbase: (a^-1 mod p)
-    // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all p \nmid a in
-    // factorbase. Plain u32 (0 dummy where p | a): validity is decided by
-    // q_inv_mod_ps[p].is_none(), so an Option here would only double the memory
-    // traffic of the per-polynomial root-update loop.
+    // the choices of the primes of q, best first, and the index of the next one
+    list_of_qis: Vec<Vec<u32>>,
+    num_a: usize,
+    // for each prime q_i of q: B_i with B_i² ≡ n (mod q_i²) and B_i ≡ 0 (mod q_j²) for
+    // j ≠ i, so that the b = Σ ±B_i are the square roots of n modulo a
+    bis: Vec<Integer>,
+    // a⁻¹ mod p for each factor-base prime p, or None if p | a or p ≤ 2
+    q_inv_mod_ps: Vec<Option<NonZeroU32>>,
+    // bainv2ips[i][p] = 2 B_i a⁻¹ mod p for each factor-base prime p, by which the
+    // roots change when B_i changes its sign in b. A plain u32 with a dummy 0 where
+    // q_inv_mod_ps is None, since an Option would double the memory traffic of the
+    // root update.
     bainv2ips: Vec<Vec<u32>>,
-    roots: Roots, // for all p \nmid a in factorbase: (root1,root2) = (ainv * (sqrt(n mod p) - b), ainv * (-sqrt(n mod p) - b)) (mod p)
+    // the roots of the current polynomial modulo the factor-base primes
+    roots: Roots,
 
-    j: usize, // index of polynomial for fixed a, 1 <= j <= 2^(s-1) - 1,
+    // the number of polynomials of the current family generated so far
+    j: usize,
     a: Integer,
     q: Integer,
     q_inverse_mod_n: Integer,
-    b: Integer, // the b for j
-    c: Integer, // (b^2 - n)/a for the first b of the current a
+    // b of the current polynomial, and c of the first one of the family
+    b: Integer,
+    c: Integer,
 
+    // n, the factor base and the square roots of n modulo its primes
     n: &'a Integer,
     factorbase: &'a [u32],
-    n_roots: &'a [u32], // the roots of n modulo the primes in the factor base
-    //sieve_interval_length: u64,
-    prime_factors_for_q: &'a [u32], // we choose the q from this subset of the factorbase
-    total_q_size: f64,              // target size of a = q^2, used to regenerate list_of_qis
-    window_offset: usize,           // shift of the prime window when regenerating fresh a's
-    pub num_polynomials: usize,     // record the number of polynomials used
+    n_roots: &'a [u32],
+    // the primes from which q is built
+    prime_factors_for_q: &'a [u32],
+    // the ideal size of q, from which list_of_qis is computed
+    total_q_size: f64,
+    // how far the window of primes for q has moved towards larger primes, after the
+    // lists of a before were used up
+    window_offset: usize,
 }
 
 impl<'a> SIQSPolynomialData<'a> {
+    // the further primes of q are chosen from a window of 2 Q_RANGE primes around
+    // their ideal size
     const Q_RANGE: usize = 10;
-    //const RANGE_MULTIPLIER: usize = 3;
 
     fn initialize_new_set_of_polynomials(
         thread_specific_factors: &[u32],
@@ -64,12 +83,11 @@ impl<'a> SIQSPolynomialData<'a> {
         prime_factors_for_q: &'a [u32],
         roots: &'a [u32],
     ) -> SIQSPolynomialData<'a> {
-        // compute size of "average" qi
-        // q \approx sqrt((sqrt(2 * kn)/sieve_interval_length)
+        // the ideal q = √a for a = √(2n) / M
         let total_q_size = ((2.0 * n.to_f64()).sqrt() / sieve_interval_length as f64).sqrt();
         let mut polynomial_data = SIQSPolynomialData {
             thread_number,
-            j: 0, // index of polynomial for fixed a, 1 <= j <= 2^(s-1) - 1,
+            j: 0,
             s: 0,
             num_factors: 0,
             thread_specific_factors: thread_specific_factors.to_vec(),
@@ -77,12 +95,12 @@ impl<'a> SIQSPolynomialData<'a> {
             q: Integer::from(1),
             q_inverse_mod_n: Integer::from(1),
             list_of_qis: Vec::new(),
-            num_a: 0,        // index of the next element of list_of_qis
-            bis: Vec::new(), // for i = 1..s: B[i] = a/q[i] * gamma, gamma = sqrt(n mod p) * (a/q[i])^-1 (mod q[i])
-            q_inv_mod_ps: Vec::with_capacity(factorbase.len()), //  for all p \nmid a in factorbase: (a^-1 mod p)
-            bainv2ips: Vec::new(), // Bainv2ips[i,p] = (2 * B[i] * (a^-1 mod p)) (mod p), for all p \nmid a in factorbase
+            num_a: 0,
+            bis: Vec::new(),
+            q_inv_mod_ps: Vec::with_capacity(factorbase.len()),
+            bainv2ips: Vec::new(),
             a: Integer::from(0),
-            b: Integer::from(0), // the b for j,
+            b: Integer::from(0),
             c: Integer::from(0),
             roots: Roots::default(),
             n,
@@ -91,7 +109,6 @@ impl<'a> SIQSPolynomialData<'a> {
             prime_factors_for_q,
             total_q_size,
             window_offset: 0,
-            num_polynomials: 0,
         };
         polynomial_data.compute_list_of_factors_of_q(total_q_size, prime_factors_for_q);
         polynomial_data.precompute_polynomial_data_for_q(n, factorbase, roots);
@@ -108,18 +125,15 @@ impl<'a> SIQSPolynomialData<'a> {
         (total_q_size / self.prod_thread_specific_factors.to_f64()).powf(1.0 / s as f64) as f32
     }
 
+    // The number s of further primes of q, and the index i of the first prime above
+    // their average size: the largest s for which there are Q_RANGE primes on either
+    // side of i above the thread-specific ones, or else the smallest s for which
+    // there are Q_RANGE primes above i.
     fn compute_number_of_factors_of_q(
         &self,
         total_q_size: f64,
         prime_factors_for_q: &[u32],
     ) -> (usize, usize) {
-        // fixed number of factors: 5
-        /*let s = 7 - self.thread_specific_factors.len();
-        let average_q_size: u32 = self.compute_average_size_of_q(total_q_size, s) as u32;
-        let i = prime_factors_for_q.iter().position(|&p| p > average_q_size).expect("average q size too large for factorbase");
-        (s, i)*/
-
-        // compute maximum possible number of factors
         let mut s = 2_usize;
         let mut s_min;
         let mut i_min;
@@ -144,7 +158,6 @@ impl<'a> SIQSPolynomialData<'a> {
                     > *self.thread_specific_factors.last().unwrap()
                 && prime_factors_for_q.get(i + Self::Q_RANGE).is_some()
             {
-                //println!("s = {s}");
                 (s_min, i_min) = (s, i);
             } else {
                 return (s_min, i_min);
@@ -153,12 +166,14 @@ impl<'a> SIQSPolynomialData<'a> {
         }
     }
 
+    // Fills list_of_qis with the choices of s primes from the window around their
+    // ideal size, each with the thread-specific primes, sorted by how close their
+    // product comes to the ideal q.
     fn compute_list_of_factors_of_q(&mut self, total_q_size: f64, prime_factors_for_q: &[u32]) {
         let (s, i) = self.compute_number_of_factors_of_q(total_q_size, prime_factors_for_q);
         self.s = s;
         self.num_factors = s + self.thread_specific_factors.len();
         let range_size = Self::Q_RANGE;
-        //let range_size = Self::RANGE_MULTIPLIER * s;
         let n_primes = prime_factors_for_q.len();
         // q's prime factors must be larger than every thread-specific factor (so
         // they stay distinct from them) and must skip the -1 sentinel at index 0;
@@ -168,12 +183,12 @@ impl<'a> SIQSPolynomialData<'a> {
             .iter()
             .position(|&p| p > tsf_last)
             .unwrap_or(0);
-        // Window of `window` primes from which we pick combinations of `s`,
-        // positioned near the ideal index `i`. Clamp every index into
-        // [lo, n_primes) so the math can't underflow for small N (where the ideal
-        // q is tiny, pushing `i` below range_size) or run past a short factor base.
-        // window_offset shifts the window towards larger primes when a previous
-        // batch of a's was exhausted, yielding fresh combinations.
+        // The window of `window` primes from which the combinations of `s` are picked,
+        // near the ideal index `i`. Every index is clamped into [lo, n_primes), so
+        // that nothing underflows for small n (where the ideal q is tiny, which pushes
+        // `i` below range_size) or runs past a short factor base. window_offset
+        // shifts the window towards larger primes once the lists of a before are
+        // used up, which gives new combinations.
         let window = (range_size * 2).min(n_primes.saturating_sub(lo)).max(s);
         let i_min = i.saturating_sub(range_size).max(lo);
         let max_start = n_primes.saturating_sub(window).max(lo);
@@ -206,8 +221,6 @@ impl<'a> SIQSPolynomialData<'a> {
             for q in qis {
                 new_qis.push(*q);
             }
-            //let q = product_u32_to_integer(&new_qis);
-            //println!("quality: {quality}");
             self.list_of_qis.push(new_qis);
         }
         debug!(
@@ -255,16 +268,18 @@ impl<'a> SIQSPolynomialData<'a> {
         }
     }
 
+    // Switches to the next a of the list: computes q⁻¹ mod n, the B_i, a⁻¹ and
+    // 2 B_i a⁻¹ modulo the factor base, and the first polynomial of the family and its
+    // roots.
     fn precompute_polynomial_data_for_q(&mut self, n: &Integer, factorbase: &[u32], roots: &[u32]) {
         trace!("thread #{}: next a", self.thread_number);
-        // use up the next a of the list
         let qis = &self.list_of_qis[self.num_a];
         self.num_a += 1;
         self.q = product_u32_to_integer(qis);
         self.a = self.q.square_ref().complete();
         self.q_inverse_mod_n = self.q.invert_ref(n).unwrap().complete();
 
-        // compute the corresponding B[i]'s with B[i]^2 = delta_{ij} * n (mod q[j])
+        // B_i = (a / q_i²) γ_i with γ_i ≡ √n (a / q_i²)⁻¹ (mod q_i²)
         self.bis.clear();
         for q in qis {
             let a_div_q = self.q.div_exact_u_ref(*q).complete();
@@ -285,7 +300,7 @@ impl<'a> SIQSPolynomialData<'a> {
             self.bis.push(a_div_q_squared * gamma);
         }
 
-        // compute a^-1 (mod p) if it exists
+        // a⁻¹ mod p, where it exists
         self.q_inv_mod_ps.clear();
         for &p in factorbase {
             if p > 2
@@ -299,7 +314,7 @@ impl<'a> SIQSPolynomialData<'a> {
             }
         }
 
-        // compute Bainv2_{j,p} (mod p); they are used to update the roots when changing b_i to b_{i+1} in the polynomial
+        // 2 B_i a⁻¹ mod p
         self.bainv2ips.clear();
         for b in self.bis.iter() {
             self.bainv2ips.push(Vec::with_capacity(factorbase.len()));
@@ -314,11 +329,10 @@ impl<'a> SIQSPolynomialData<'a> {
             }
         }
 
-        // compute b
+        // the first polynomial of the family: b = Σ B_i
         self.b = self.bis.iter().sum();
         self.c = (self.b.square_ref().complete() - n).div_exact(&self.a);
 
-        // DEBUG: test B[i]
         for (i, q) in qis.iter().enumerate() {
             debug_assert!(
                 (self.bis[i].clone().square() - n.clone())
@@ -341,11 +355,11 @@ impl<'a> SIQSPolynomialData<'a> {
         self.compute_roots(factorbase, roots);
     }
 
-    // returns the next polynomial and its roots modulo the primes in the factorbase
+    /// The next polynomial and its roots modulo the factor-base primes. After the last
+    /// polynomial of a family comes the first of the next a, and after the last a of
+    /// the list, the first of a new list, from larger primes.
     pub fn next_polynomial(&mut self) -> (Polynomial<'_>, &Roots) {
-        self.num_polynomials += 1;
-
-        // the first polynomial has already been computed in initialize_new_set_of_polynomials()
+        // the first polynomial of the family, computed with its a
         if self.j == 0 {
             self.j += 1;
             let b = self.b.clone();
@@ -361,14 +375,11 @@ impl<'a> SIQSPolynomialData<'a> {
                 &self.roots,
             );
         }
-        // after the last polynomial:
-        // initialize_new_set_of_polynomials(index_thread)
+        // after the last polynomial of the family, switch to the next a
         if self.j == 1 << (self.num_factors - 1) {
-            // generate new a
             if self.num_a >= self.list_of_qis.len() {
-                // exhausted all a's for the current prime window: shift the window
-                // towards larger primes and regenerate a fresh batch of a's instead
-                // of aborting the whole factorization.
+                // all a of the list are used up: shift the window of primes towards
+                // larger ones for a new list
                 self.window_offset += Self::Q_RANGE;
                 let prime_factors_for_q = self.prime_factors_for_q;
                 self.compute_list_of_factors_of_q(self.total_q_size, prime_factors_for_q);
@@ -400,9 +411,9 @@ impl<'a> SIQSPolynomialData<'a> {
         }
         let b = self.b.clone();
         let c = (b.square_ref().complete() - self.n).div_exact(&self.a);
-        debug_assert_eq!(b.clone().square() - self.a.clone() * c.clone(), *self.n); // discriminant of polynomial should be n
+        debug_assert_eq!(b.clone().square() - self.a.clone() * c.clone(), *self.n);
 
-        // update roots with new b, old a
+        // update the roots for the new b
         assert!(
             self.roots.len() == self.q_inv_mod_ps.len()
                 && self.factorbase.len() == self.roots.len()
@@ -427,7 +438,7 @@ impl<'a> SIQSPolynomialData<'a> {
                 let new_roots =
                     Self::new_roots_with_sign((*r1, *r2), bainv, p, rounded_exponent % 2 != 0);
                 (*r1, *r2) = new_roots;
-                // check that we really have roots of (ax + b)^2 - n
+                // check that they are roots of Q
                 debug_assert!(
                     (self.a.clone() * new_roots.0 * new_roots.0
                         + 2u32 * b.clone() * new_roots.0
@@ -453,6 +464,7 @@ impl<'a> SIQSPolynomialData<'a> {
         )
     }
 
+    // the roots plus b if `sign` is set, else minus b, modulo p
     #[inline]
     fn new_roots_with_sign(roots: (u32, u32), b: u32, p: u32, sign: bool) -> (u32, u32) {
         if sign {
@@ -486,6 +498,9 @@ impl<'a> SIQSPolynomialData<'a> {
         }
     }
 
+    // The Gray code step to the next polynomial of the family: for 2^ν ∥ 2j, b changes
+    // by 2 B_ν, with the sign (−1)^⌈j / 2^ν⌉. Returns ⌈j / 2^ν⌉ and the index ν − 1
+    // of B_ν, and advances j.
     #[inline]
     fn compute_nu_and_rounded_exponent(&mut self) -> (usize, usize) {
         let nu = (self.j * 2).trailing_zeros() as usize;
@@ -506,6 +521,11 @@ impl<'a> SIQSPolynomialData<'a> {
     }
 }
 
+/// One polynomial generator per sieving thread, for n with the given `factorbase`,
+/// the square roots `roots` of n modulo it and the interval [−M, M), M =
+/// `sieve_interval_length`. The q of each generator are products of primes from
+/// `prime_factors_for_q`, a subset of the factor base, which include a combination of
+/// primes specific to the generator.
 pub fn new_polynomial_generators<'a>(
     n: &'a Integer,
     sieve_interval_length: u64,
@@ -524,7 +544,7 @@ pub fn new_polynomial_generators<'a>(
         prime_factors_for_q.len() >= start_index_thread_factors + num_thread_factors,
         "factor base too small for {num_threads} threads"
     );
-    // for each thread: compute machine specific divisors
+    // enough combinations of thread-specific primes for all threads
     assert!(
         Integer::from(2 * num_thread_factors)
             .binomial(num_thread_factors as u32)
@@ -538,9 +558,8 @@ pub fn new_polynomial_generators<'a>(
         .combinations(num_thread_factors);
     let mut thread_polynomial_data = Vec::<SIQSPolynomialData>::with_capacity(num_threads);
     for (thread_number, combination) in combinations.into_iter().enumerate().take(num_threads) {
-        // ensures that two different threads differ in at least one thread specific factor
+        // two threads differ in at least one thread-specific prime
         let thread_specific_factors: Vec<u32> = combination.into_iter().copied().collect();
-        // for each thread: run initialize_new_set_of_polynomials
         thread_polynomial_data.push(SIQSPolynomialData::initialize_new_set_of_polynomials(
             &thread_specific_factors,
             thread_number,
@@ -559,15 +578,14 @@ mod tests {
     use super::*;
     use crate::factorbase::{make_factorbase, square_roots_mod_factorbase};
 
-    // C makes next_polynomial regenerate a fresh batch of a coefficients (by
-    // advancing window_offset) instead of panicking once the precomputed list is
-    // used up. Driving full exhaustion needs millions of polynomials for a
-    // realistic N, so test the mechanism directly: advancing window_offset and
-    // recomputing must shift the prime-selection window and thus the a's.
+    // next_polynomial makes a new list of a, by advancing window_offset, once the
+    // list is used up. That takes millions of polynomials for a realistic n, so test
+    // the mechanism directly: advancing window_offset and recomputing must shift the
+    // window of primes and thus the a.
     #[test]
     fn test_window_offset_shifts_generated_as() {
-        // The 202-bit benchmark N: large enough that the q-factor index lands well
-        // past Q_RANGE (a smaller N would underflow the i - range_size index math).
+        // The 202-bit example: large enough that the index of the q-primes lands well
+        // past Q_RANGE (a smaller n would underflow the i - range_size index math).
         let n = "6427752177035961102167848371107669985402627402189138248671463"
             .parse::<Integer>()
             .unwrap();
@@ -581,8 +599,8 @@ mod tests {
         let before = generator.list_of_qis.clone();
         assert!(!before.is_empty());
 
-        // Simulate exhaustion: advance the window and regenerate (as the new
-        // branch in next_polynomial does) and confirm we get different a's.
+        // advance the window and recompute, as next_polynomial does once the list is
+        // used up: the a must change
         generator.window_offset += SIQSPolynomialData::Q_RANGE;
         generator.compute_list_of_factors_of_q(generator.total_q_size, &factorbase);
         let after = generator.list_of_qis.clone();
@@ -689,7 +707,7 @@ mod tests {
     }
 
     // The root of the linear polynomial 2 b x + c modulo p | a is reduced and
-    // correct for every c, including c ≡ 0, where it used to be p (d2fbf80).
+    // correct for every c, including c ≡ 0, where it used to be p (ceb1033).
     #[test]
     fn linear_root_is_reduced_and_correct() {
         let p = 101u32;
@@ -718,10 +736,10 @@ mod tests {
         }
     }
 
-    // Small N: the factor base is short and the ideal q is tiny, so the
-    // prime-selection window sits near the start of the factor base. Building a
-    // generator must not panic (it used to underflow `i - range_size` and trip
-    // the window assert) and must produce a usable set of distinct a-factors.
+    // Small n: the factor base is short and the ideal q is tiny, so the window of
+    // primes for q sits near the start of the factor base. Building a generator must
+    // not panic (it used to underflow `i - range_size` and trip the window assert)
+    // and must produce a usable set of distinct primes for a.
     #[test]
     fn test_small_n_generator_builds() {
         let p = ((Integer::from(1) << 16u32) + 12345u32).next_prime();
@@ -734,7 +752,7 @@ mod tests {
         assert!(g.s >= 2, "need at least two q-factors, got s={}", g.s);
         assert!(
             !g.list_of_qis.is_empty(),
-            "no a coefficients generated for small N"
+            "no a coefficients generated for small n"
         );
         // every chosen q-factor must be a real factor-base prime (> 2) and the
         // factors within one a must be distinct

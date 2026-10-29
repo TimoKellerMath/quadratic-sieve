@@ -1,8 +1,10 @@
-// this file uses the computation of the multiplier and some sieve parameters from msieve
-
 use crate::number_theory::*;
 use rug::{Complete, Integer};
 
+/// The squarefree multiplier k ≤ 73 that maximizes the Knuth–Schroeppel function, the
+/// expected contribution of the small primes to the smoothness of the values Q(x) for
+/// kn, minus the cost of the larger kn, computed as in msieve. An error if n has a
+/// prime factor below 1000.
 pub fn compute_multiplier(n: &Integer) -> Result<u32, NumberTheoryError> {
     let multipliers = [
         1, 2, 3, 5, 6, 7, 10, 11, 13, 14, 15, 17, 19, 21, 22, 23, 26, 29, 30, 31, 33, 34, 35, 37,
@@ -36,7 +38,6 @@ pub fn compute_multiplier(n: &Integer) -> Result<u32, NumberTheoryError> {
             }
         }
     }
-    //println!("scores = {scores:?}");
     let mut min_score = f64::INFINITY;
     let mut index = 0;
     for (i, score) in scores.iter().enumerate() {
@@ -48,7 +49,7 @@ pub fn compute_multiplier(n: &Integer) -> Result<u32, NumberTheoryError> {
     Ok(multipliers[index])
 }
 
-#[allow(dead_code)]
+// an entry of the parameter table: the parameters for n of `bits` bits
 #[derive(Debug)]
 struct SieveParameter {
     bits: usize,
@@ -57,7 +58,7 @@ struct SieveParameter {
     sieve_size: usize,
 }
 
-// from msieve -> mpqs.c
+// from msieve's mpqs.c
 #[rustfmt::skip]
 const SIEVE_PARAMETERS: &[SieveParameter] = &[
     SieveParameter { bits: 64,  factorbase_size: 100,    large_prime_multiplier: 40,  sieve_size: 65536       },
@@ -78,7 +79,10 @@ const SIEVE_PARAMETERS: &[SieveParameter] = &[
     SieveParameter { bits: 395, factorbase_size: 400000, large_prime_multiplier: 150, sieve_size: 21 * 65536  },
 ];
 
-// From the bit length bits of n, compute the factorbase size and the sieve size
+/// The factor base size, the half-length M of the sieve interval and the large-prime
+/// multiplier for a number of `bits` bits, interpolated linearly in a table from
+/// msieve and clamped to its range. The large primes are those below the multiplier
+/// times the largest factor-base prime.
 pub fn compute_sieve_parameters(bits: usize) -> (usize, usize, u32) {
     let first_parameter = &SIEVE_PARAMETERS[0];
     if bits <= first_parameter.bits {
@@ -178,7 +182,7 @@ mod tests {
         assert_eq!(compute_sieve_parameters(10), (100, 65536, 40));
         assert_eq!(compute_sieve_parameters(64), (100, 65536, 40));
         // above the table, all three come from its last entry; the large-prime
-        // multiplier used to come from the first one (c089ffc)
+        // multiplier used to come from the first one (23f539e)
         assert_eq!(compute_sieve_parameters(395), (400000, 21 * 65536, 150));
         assert_eq!(compute_sieve_parameters(500), (400000, 21 * 65536, 150));
     }
