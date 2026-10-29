@@ -41,6 +41,8 @@
 //!
 //! [`number_theory`] provides the modular arithmetic for these steps.
 
+#![warn(missing_docs)]
+
 /// The sieve: sums of logs over one polynomial's interval, in blocks, with buckets
 /// for the primes larger than a block.
 pub mod block_sieve;
