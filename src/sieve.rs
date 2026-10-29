@@ -548,8 +548,10 @@ fn collect_relations(
         let relation = if relation.is_full() {
             trace!("thread {index_thread}: full relation");
             relation
-        } else if let Some(full) = partial_relations.add(relation) {
+        } else if let Some(mut full) = partial_relations.add(relation) {
             trace!("thread {index_thread}: partial relation, completing a full one");
+            // the product of the partials' u matters only modulo kn
+            full.u %= &params.kn;
             full
         } else {
             trace!("thread {index_thread}: partial relation");

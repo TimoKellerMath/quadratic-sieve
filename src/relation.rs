@@ -98,6 +98,12 @@ impl LargePrimes {
         self.b
     }
 
+    // the two slots, the smaller first: 1 stands for an empty one
+    #[inline]
+    pub(crate) fn pair(self) -> (u32, u32) {
+        (self.a, self.b)
+    }
+
     // symmetric difference: primes appearing an odd number of times across the two
     // sets. The two sets always share their pivot, so the result has at most two
     // elements. Computed by odd-count over all four slots (order-independent: a
