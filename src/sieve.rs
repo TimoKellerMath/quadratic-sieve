@@ -817,6 +817,50 @@ mod tests {
         assert!(found > 100, "only {found} candidates");
     }
 
+    // Without the small prime variation, the scan finds the positions whose sums
+    // reach the threshold of their own window, for blocks shorter than a window and
+    // longer ones, and a partial last block.
+    #[test]
+    fn scan_uses_the_threshold_of_each_window() {
+        let total_len = 5 * SCAN_WINDOW + 1234;
+        let mut seed = 0x51ED_270B_u64;
+        let sums: Vec<u8> = (0..total_len)
+            .map(|_| {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (seed >> 57) as u8
+            })
+            .collect();
+        let thresholds: Vec<u8> = (0..total_len.div_ceil(SCAN_WINDOW))
+            .map(|w| 100 + 5 * w as u8)
+            .collect();
+        let want: Vec<u32> = (0..total_len)
+            .filter(|&i| sums[i] >= thresholds[i / SCAN_WINDOW])
+            .map(|i| i as u32)
+            .collect();
+        assert!(want.len() > 100);
+        let no_unsieved = Unsieved {
+            indices: 0..0,
+            allowance: 0,
+            factorbase: &[],
+            logs: &[],
+            inverses: &[],
+        };
+        for block_size in [SCAN_WINDOW / 2, SCAN_WINDOW, 4 * SCAN_WINDOW] {
+            let mut candidates = Vec::new();
+            for (b, block) in sums.chunks(block_size).enumerate() {
+                scan_block(
+                    b * block_size,
+                    block,
+                    &thresholds,
+                    &no_unsieved,
+                    &Roots::default(),
+                    &mut candidates,
+                );
+            }
+            assert_eq!(candidates, want, "block size {block_size}");
+        }
+    }
+
     #[test]
     fn lp_slack_defaults() {
         let close = |x: f64, y: f64| (x - y).abs() < 1e-12;

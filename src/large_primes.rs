@@ -186,11 +186,13 @@ mod tests {
         );
     }
 
-    // On a random graph, every full relation is a product of partials whose large
-    // primes cancel, there are as many as independent cycles (edges minus vertices
-    // plus trees), and the cycles stay short.
+    // On a random graph, every full relation is a product of distinct partials whose
+    // large primes cancel, there are as many as independent cycles (edges minus
+    // vertices plus trees, counted with an independent union-find over all edges),
+    // the partials kept form a forest, and the cycles stay short.
     #[test]
     fn random_partials_give_one_full_relation_per_independent_cycle() {
+        use std::collections::HashMap;
         let mut seed = 0x9E37_79B9_7F4A_7C15u64;
         let mut random = |bound: u64| {
             seed ^= seed << 13;
@@ -198,38 +200,9 @@ mod tests {
             seed ^= seed << 17;
             seed % bound
         };
-        // the large primes stand in as 3, 5, ..., and v records the partials of a
-        // relation as a product of distinct primes, which must be squarefree in a
-        // simple cycle
-        let primes: Vec<u32> = (0..400).map(|i| 3 + 2 * i).collect();
-        let mut partials = PartialRelations::new();
-        let mut vertices = std::collections::HashSet::from([1u32]);
-        let mut fulls = 0;
-        let mut longest = 0;
-        let edges = 1500;
-        for i in 0..edges {
-            let p = primes[random(primes.len() as u64) as usize];
-            let q = primes[random(primes.len() as u64) as usize];
-            let large_primes = match random(3) {
-                0 => LargePrimes::one(p),
-                _ if p != q => LargePrimes::two(p, q),
-                _ => LargePrimes::one(q),
-            };
-            vertices.insert(p);
-            vertices.insert(q);
-            // u is the index of the partial, plus one
-            let partial = relation(&[i % 7], i + 1, 1, large_primes);
-            if let Some(full) = partials.add(partial) {
-                assert!(full.is_full());
-                fulls += 1;
-                longest = longest.max(full.u.significant_bits());
-            }
-        }
-        // count the trees with an independent union-find
-        let mut parent: std::collections::HashMap<u32, u32> =
-            vertices.iter().map(|&v| (v, v)).collect();
-        fn find(parent: &mut std::collections::HashMap<u32, u32>, v: u32) -> u32 {
-            let p = parent[&v];
+        // a union-find over u32 vertices
+        fn find(parent: &mut HashMap<u32, u32>, v: u32) -> u32 {
+            let p = *parent.entry(v).or_insert(v);
             if p == v {
                 return v;
             }
@@ -237,22 +210,76 @@ mod tests {
             parent.insert(v, root);
             root
         }
-        let mut trees = vertices.len();
+        // the large primes stand in as 3, 5, ...; partial i has u = the i-th prime,
+        // so the u of a full relation tells which partials it multiplies
+        let tags: Vec<u32> = (2u32..)
+            .filter(|&t| (2..t).take_while(|d| d * d <= t).all(|d| t % d != 0))
+            .take(1500)
+            .collect();
+        let vertices: Vec<u32> = (0..400).map(|i| 3 + 2 * i).collect();
+        let mut partials = PartialRelations::new();
+        let mut large_primes_of = Vec::new();
+        let mut components = HashMap::new();
+        let mut merges = 0;
+        let mut touched = std::collections::HashSet::from([1u32]);
+        let mut fulls = 0;
+        let mut longest = 0;
+        for (i, &tag) in tags.iter().enumerate() {
+            let p = vertices[random(vertices.len() as u64) as usize];
+            let q = vertices[random(vertices.len() as u64) as usize];
+            let large_primes = match random(3) {
+                0 => LargePrimes::one(p),
+                _ if p != q => LargePrimes::two(p, q),
+                _ => LargePrimes::one(q),
+            };
+            large_primes_of.push(large_primes);
+            let (a, b) = large_primes.pair();
+            touched.extend([a, b]);
+            let (ra, rb) = (find(&mut components, a), find(&mut components, b));
+            if ra != rb {
+                components.insert(ra, rb);
+                merges += 1;
+            }
+            let partial = relation(&[i as u32 % 7], tag, 1, large_primes);
+            let Some(full) = partials.add(partial) else {
+                continue;
+            };
+            fulls += 1;
+            assert!(full.is_full());
+            // the partials it multiplies, each at most once, and their large primes
+            // each an even number of times
+            let mut u = full.u.clone();
+            let mut count = HashMap::new();
+            let mut length = 0;
+            for (j, &t) in tags.iter().enumerate().take(i + 1) {
+                if u.is_divisible_u(t) {
+                    u.div_exact_u_mut(t);
+                    assert!(!u.is_divisible_u(t), "partial {j} used twice");
+                    length += 1;
+                    let (a, b) = large_primes_of[j].pair();
+                    for prime in [a, b].into_iter().filter(|&prime| prime != 1) {
+                        *count.entry(prime).or_insert(0) += 1;
+                    }
+                }
+            }
+            assert_eq!(u, 1);
+            assert!(count.values().all(|&c| c % 2 == 0), "large primes left");
+            longest = longest.max(length);
+        }
+        // independent cycles: edges - (vertices - trees) = edges - merges
+        assert_eq!(fulls, tags.len() - merges);
+        assert_eq!(partials.edges.len(), merges);
+        // the partials kept form a forest
+        let mut forest = HashMap::new();
         for edge in &partials.edges {
             let (p, q) = edge.large_primes.pair();
-            let (rp, rq) = (find(&mut parent, p), find(&mut parent, q));
+            let (rp, rq) = (find(&mut forest, p), find(&mut forest, q));
             assert_ne!(rp, rq, "the kept partials contain a cycle");
-            parent.insert(rp, rq);
-            trees -= 1;
+            forest.insert(rp, rq);
         }
-        // only the vertices that some edge touches count; all of them do here
-        assert_eq!(fulls, edges as usize - (vertices.len() - trees));
-        // a product of a few partial indices below 1500: a cycle of at most about
-        // 20 edges
-        assert!(
-            longest < 20 * 11,
-            "longest cycle has a product of {longest} bits"
-        );
+        assert!(touched.len() > 300);
+        // 24 in this dense graph (degree 7.5 on average); real ones are sparser
+        assert!(longest <= 40, "a cycle of {longest} partials");
     }
 
     // With single large primes only, the cycle graph combines exactly like the
