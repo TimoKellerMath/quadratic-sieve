@@ -240,6 +240,7 @@ fn run_sieve_producer(
     // with zero, one or two large primes
     let mut prof_candidates = 0u64;
     let mut prof_relations = [0u64; 3];
+    let prof_start = Instant::now();
 
     // A sieving thread never decides on its own to stop: it runs until the
     // collecting thread drops the relation receiver, and the next `send` below then
@@ -344,10 +345,13 @@ fn run_sieve_producer(
                 let setup = SIEVE_SETUP_NANOS.load(Ordering::Relaxed) / calls / 1000;
                 let bloop = SIEVE_LOOP_NANOS.load(Ordering::Relaxed) / calls / 1000;
                 let polys = prof_polys as f64;
+                // the throughput of all sieving threads together
+                let rate = calls as f64 / prof_start.elapsed().as_secs_f64();
                 eprintln!(
                     "[profile] {prof_polys} polys | per poly: poly {:.0}us \
                      sieve {:.0}us (setup {setup}us loop {bloop}us) scan+factor {:.0}us | \
-                     candidates {:.2} relations: full {:.4} 1LP {:.4} 2LP {:.4}",
+                     candidates {:.2} relations: full {:.4} 1LP {:.4} 2LP {:.4} | \
+                     {rate:.0} polys/s on all threads",
                     prof_poly.as_micros() as f64 / polys,
                     prof_sieve.as_micros() as f64 / polys,
                     prof_scan.as_micros() as f64 / polys,
