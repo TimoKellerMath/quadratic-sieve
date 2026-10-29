@@ -66,7 +66,9 @@ minimal one that prints to stdout.
 
 ### Other binaries
 
-- `bench_sieve_block` compares sieve block sizes.
+- `bench_sieve_block [bits [polynomials [block size in KiB ...]]]` times the sieve
+  for several block sizes, on one thread, with the parameters and polynomials for a
+  semiprime of the given size (default 301 bits).
 - `lanczos_repro` replays a matrix written by `SIQS_DUMP_MATRIX` through Block
   Lanczos.
 

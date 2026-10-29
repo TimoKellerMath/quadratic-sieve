@@ -1,129 +1,108 @@
-use siqs::block_sieve;
-
-use std::time::Instant;
-
-fn is_prime(n: u32) -> bool {
-    if n < 2 {
-        return false;
-    }
-    if n.is_multiple_of(2) {
-        return n == 2;
-    }
-    let mut d = 3u32;
-    while (d as u64) * (d as u64) <= n as u64 {
-        if n.is_multiple_of(d) {
-            return false;
-        }
-        d += 2;
-    }
-    true
-}
-
-// generate first `count` primes starting from 3 (we will later insert -1 and 2 if needed)
-fn generate_primes(count: usize) -> Vec<u32> {
-    let mut primes = Vec::with_capacity(count);
-    let mut p = 3u32;
-    while primes.len() < count {
-        if is_prime(p) {
-            primes.push(p);
-        }
-        p += 2;
-    }
-    primes
-}
-
-// tiny deterministic pseudo RNG
-fn next_rand(seed: &mut u64) -> u64 {
-    *seed = seed
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(1442695040888963407);
-    *seed
-}
+// Times the sieve of one polynomial for several block sizes, with the parameters
+// the sieve uses for a semiprime of the given size and the roots of its first
+// polynomials. It runs on one thread, so unlike the sieving threads, the sieve has
+// the shared caches to itself.
+//
+// Usage: bench_sieve_block [bits [polynomials [block size in KiB ...]]]
+// Defaults: 301 bits, 1000 polynomials, block sizes of 16 to 512 KiB.
+use rug::Integer;
+use siqs::block_sieve::{SieveScratch, sieve_over_factorbase_blocked};
+use siqs::factorbase::{compute_logs, make_factorbase, square_roots_mod_factorbase};
+use siqs::multiplier::{compute_multiplier, compute_sieve_parameters};
+use siqs::number_theory::SMALL_PRIMES;
+use siqs::siqs_generator::new_polynomial_generators;
+use std::time::{Duration, Instant};
 
 fn main() {
-    // parameters (anpassbar)
-    let sieve_interval_length = 65536usize; // half-window; total_len = 131072
-    let num_primes = 2000usize; // Größe des factorbase (ohne -1 und 2)
-    let iters = 5usize; // wie oft pro Blockgröße laufen (für stabileren Mittelwert)
-
-    // Build synthetic factorbase, roots and logs
-    // We'll create factorbase entries: [-1, 2, primes...]
-    let mut factorbase: Vec<u32> = Vec::with_capacity(2 + num_primes);
-    factorbase.push(u32::MAX); // placeholder for -1 (index 0 in original code)
-    factorbase.push(2); // index 1
-    let primes = generate_primes(num_primes);
-    factorbase.extend_from_slice(&primes);
-
-    // roots: for -1 and 2 we put None placeholders (the sieve code expects alignment)
-    let mut roots = siqs::polynomial_generator::Roots::default();
-    roots.push(None); // -1
-    roots.push(None); // 2
-
-    // deterministic roots for primes
-    let mut seed = 123456789u64;
-    for &p in &primes {
-        let r1 = (next_rand(&mut seed) % (p as u64)) as u32;
-        let r2 = (next_rand(&mut seed) % (p as u64)) as u32;
-        roots.push(Some((r1, r2)));
+    let mut args = std::env::args().skip(1).map(|arg| {
+        arg.parse::<usize>()
+            .unwrap_or_else(|_| panic!("not a number: {arg}"))
+    });
+    let bits = args.next().unwrap_or(301);
+    let polynomials = args.next().unwrap_or(1000).max(1);
+    let mut block_sizes: Vec<usize> = args.map(|kib| kib << 10).collect();
+    if block_sizes.is_empty() {
+        block_sizes = (14..=19).map(|shift| 1 << shift).collect();
     }
+    assert!(bits >= 40, "at least 40 bits");
+    assert!(
+        block_sizes.iter().all(|size| size.is_power_of_two()),
+        "block sizes must be powers of two"
+    );
 
-    // logs: rounded log2(p) as u8
-    let mut logs: Vec<u8> = Vec::with_capacity(factorbase.len());
-    logs.push(0); // -1
-    logs.push(0); // 2
-    for &p in &primes {
-        let v = (p as f32).log2().round() as u8;
-        logs.push(v.max(1));
-    }
+    // a product of two primes of about half the size, with exactly `bits` bits
+    let half = bits as u32 / 2;
+    let p = (Integer::from(1) << half).next_prime();
+    let q = (Integer::from(3) << (bits as u32 - half - 2)).next_prime();
+    let n = p * q;
+    assert_eq!(n.significant_bits() as usize, bits);
 
-    // Prepare the reusable buffers
+    // the parameters, as the sieve computes them for n
+    let k = compute_multiplier(&n).expect("no small factors");
+    let kn = n * k;
+    let (factorbase_size, sieve_interval_length, _) =
+        compute_sieve_parameters(kn.significant_bits() as usize + 1);
+    let factorbase_without_k = make_factorbase(&kn, factorbase_size);
+    let mut factorbase = factorbase_without_k.clone();
+    factorbase.extend(SMALL_PRIMES.iter().filter(|&&p| k.is_multiple_of(p)));
+    factorbase.sort_unstable();
+    factorbase.dedup();
+    let square_roots = square_roots_mod_factorbase(&kn, &factorbase);
+    let logs = compute_logs(&factorbase);
+    let mut generators = new_polynomial_generators(
+        &kn,
+        sieve_interval_length as u64,
+        1,
+        &factorbase,
+        &square_roots,
+        &factorbase_without_k,
+    );
+    let generator = &mut generators[0];
+    println!(
+        "{bits} bits: k = {k}, {} primes up to {}, interval of 2 * {sieve_interval_length}",
+        factorbase.len(),
+        factorbase.last().unwrap(),
+    );
+
     let total_len = 2 * sieve_interval_length;
     let mut buffer = vec![0u8; total_len];
-    let mut scratch = block_sieve::SieveScratch::default();
-
-    // block sizes to test
-    let block_sizes = vec![1024usize, 4096, 16384, 32768, 65536, 2 * 65536, 4 * 65536];
-
-    println!(
-        "Benchmark: sieve interval total_len = {}, primes = {}",
-        total_len, num_primes
-    );
-    println!("Running {} iterations per block size\n", iters);
-
-    for &block_size in &block_sizes {
-        // warmup
-        let _ = block_sieve::sieve_over_factorbase_blocked(
-            sieve_interval_length,
-            &factorbase,
-            &roots,
-            &logs,
-            &mut buffer,
-            &mut scratch,
-            block_size,
-        );
-
-        // measure
-        let start = Instant::now();
-        for _ in 0..iters {
-            let _ = block_sieve::sieve_over_factorbase_blocked(
+    let mut reference = vec![0u8; total_len];
+    let mut scratch = SieveScratch::default();
+    let mut times = vec![Duration::ZERO; block_sizes.len()];
+    // one more polynomial to warm up
+    for i in 0..=polynomials {
+        let (_, roots) = generator.next_polynomial();
+        // The block sizes take turns, so that they all see a machine of the same
+        // temperature, and the first, which may find the roots still in the cache,
+        // rotates. Every block size must give the same sums.
+        for turn in 0..block_sizes.len() {
+            let b = (i + turn) % block_sizes.len();
+            let start = Instant::now();
+            sieve_over_factorbase_blocked(
                 sieve_interval_length,
                 &factorbase,
-                &roots,
+                roots,
                 &logs,
                 &mut buffer,
                 &mut scratch,
-                block_size,
+                block_sizes[b],
             );
+            if i > 0 {
+                times[b] += start.elapsed();
+            }
+            if turn == 0 {
+                reference.copy_from_slice(&buffer);
+            } else {
+                assert!(buffer == reference, "block size {} differs", block_sizes[b]);
+            }
         }
-        let elapsed = start.elapsed();
-        let avg = elapsed / (iters as u32);
-        println!(
-            "block_size = {:6} -> total = {:>9} ns, avg = {:>9} ns",
-            block_size,
-            elapsed.as_nanos(),
-            avg.as_nanos()
-        );
     }
 
-    println!("\nDone.");
+    for (&block_size, time) in block_sizes.iter().zip(&times) {
+        println!(
+            "block size {:>4} KiB: {:>6.0} us per polynomial",
+            block_size >> 10,
+            time.as_secs_f64() * 1e6 / polynomials as f64
+        );
+    }
 }
