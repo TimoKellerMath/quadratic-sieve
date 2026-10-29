@@ -25,7 +25,8 @@ on multiple threads.
 - GMP as a system library, e.g. `apt install libgmp-dev` or `pacman -S gmp`
 
 `.cargo/config.toml` builds for the native CPU (`target-cpu=native`), so
-binaries may not run on other machines.
+binaries may not run on other machines, and aligns loops to 64 bytes, so that
+the speed of the hot loops does not depend on where the code lands.
 
 ## Usage
 

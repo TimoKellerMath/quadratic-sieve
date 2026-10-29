@@ -1,2 +1,4 @@
 [build]
-rustflags = ["-C", "target-cpu=native"]
+# -align-loops=64 starts every loop at a cache line, so that the speed of a hot
+# loop no longer depends on where unrelated changes move it
+rustflags = ["-C", "target-cpu=native", "-C", "llvm-args=-align-loops=64"]
