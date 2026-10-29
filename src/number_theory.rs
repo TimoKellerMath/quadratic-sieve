@@ -99,6 +99,16 @@ impl Montgomery {
         self.reduce(a as u128 * b as u128)
     }
 
+    // REDC for n < 2^63 and x < n * 2^64: then x + q*n < 2^128 cannot carry, so the
+    // carry handling of `reduce` is not needed.
+    #[inline]
+    fn reduce_small(&self, x: u128) -> u64 {
+        debug_assert!(self.n < 1 << 63);
+        let q = (x as u64).wrapping_mul(self.neg_ninv);
+        let t = ((x + q as u128 * self.n as u128) >> 64) as u64;
+        if t >= self.n { t - self.n } else { t }
+    }
+
     // convert a plain residue into Montgomery form
     #[inline]
     fn to_mont(&self, a: u64) -> u64 {
@@ -132,14 +142,25 @@ impl Montgomery {
     }
 }
 
+// The gcd by Stein's binary algorithm: shifts and subtractions instead of the
+// divisions of Euclid's.
 #[inline]
 fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
-    while b != 0 {
-        let t = a % b;
-        a = b;
-        b = t;
+    if a == 0 || b == 0 {
+        return a | b;
     }
-    a
+    let shift = (a | b).trailing_zeros();
+    a >>= a.trailing_zeros();
+    loop {
+        b >>= b.trailing_zeros();
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        b -= a;
+        if b == 0 {
+            return a << shift;
+        }
+    }
 }
 
 // Deterministic Miller–Rabin over the given witness set: returns true iff no
@@ -203,25 +224,7 @@ pub fn is_prime_u32(n: u64) -> bool {
 /// prime.
 pub fn is_probable_prime_base2(n: u64) -> bool {
     debug_assert!(n & 1 == 1 && n > 2);
-    let mont = Montgomery::new(n);
-    let neg_one = n - mont.one; // Montgomery form of n - 1
-    let mut d = n - 1;
-    let mut s = 0u32;
-    while d & 1 == 0 {
-        d >>= 1;
-        s += 1;
-    }
-    let mut x = mont.pow(2, d);
-    if x == mont.one || x == neg_one {
-        return true;
-    }
-    for _ in 0..s - 1 {
-        x = mont.mul(x, x);
-        if x == neg_one {
-            return true;
-        }
-    }
-    false
+    miller_rabin(n, &[2])
 }
 
 /// A nontrivial divisor of the composite n, by Pollard's rho method; for a product of
@@ -230,17 +233,43 @@ pub fn is_probable_prime_base2(n: u64) -> bool {
 /// It uses Brent's cycle search, with one evaluation of f per step instead of
 /// Floyd's three, and batches the gcds: the differences of 128 steps are multiplied
 /// in Montgomery form, and only then is the gcd with n taken. The Montgomery form,
-/// with the factor 2^64, does not change the gcd for odd n.
+/// with the factor 2^64, does not change the gcd for odd n. Below 2^63, which covers
+/// the cofactors of the double large prime variation, the map is f(y) = y (y + c)
+/// with a cheaper reduction, one multiplication per step without a modular addition.
 pub fn pollard_rho_u64(n: u64) -> u64 {
     if n & 1 == 0 {
         return 2;
     }
+    if n < 1 << 63 {
+        rho::<true>(n)
+    } else {
+        rho::<false>(n)
+    }
+}
+
+// pollard_rho_u64 for odd n, with the map y (y + c) and reduce_small if SMALL (for
+// n < 2^63), else y^2 + c.
+fn rho<const SMALL: bool>(n: u64) -> u64 {
     const BATCH: usize = 128;
     let mont = Montgomery::new(n);
+    let mul = |a: u64, b: u64| {
+        if SMALL {
+            mont.reduce_small(a as u128 * b as u128)
+        } else {
+            mont.mul(a, b)
+        }
+    };
     let two = mont.to_mont(2);
     let mut c = mont.one; // Montgomery form of c, starting at 1
     loop {
-        let f = |x: u64| mont.add(mont.mul(x, x), c);
+        // y + c < 2n needs no reduction below 2^63, and y (y + c) < n * 2^64
+        let f = |y: u64| {
+            if SMALL {
+                mont.reduce_small(y as u128 * (y + c) as u128)
+            } else {
+                mont.add(mont.mul(y, y), c)
+            }
+        };
         let mut y = two;
         let mut x = two; // checkpoint: y's value at the start of the current round
         let mut ys = two; // y's value at the start of the current batch (for backtracking)
@@ -259,7 +288,7 @@ pub fn pollard_rho_u64(n: u64) -> u64 {
                 for _ in 0..count {
                     y = f(y);
                     let diff = x.abs_diff(y);
-                    q = mont.mul(q, diff); // 0 once the cycle closes (x == y)
+                    q = mul(q, diff); // 0 once the cycle closes (x == y)
                 }
                 d = gcd_u64(q, n);
                 k += count;
@@ -298,18 +327,15 @@ pub fn modular_inverse_u32(a: u32, p: u32) -> Option<u32> {
     if a == 0 {
         return None;
     }
+    // the remainders in u32, whose divisions are faster than i64 ones
     let mut t: i64 = 0;
     let mut newt: i64 = 1;
-    let mut r: i64 = p as i64;
-    let mut newr: i64 = a as i64;
+    let mut r = p;
+    let mut newr = a;
     while newr != 0 {
         let q = r / newr;
-        let tmp = t - q * newt;
-        t = newt;
-        newt = tmp;
-        let tmp = r - q * newr;
-        r = newr;
-        newr = tmp;
+        (t, newt) = (newt, t - q as i64 * newt);
+        (r, newr) = (newr, r - q * newr);
     }
     if r != 1 {
         return None;
@@ -480,6 +506,47 @@ mod tests {
                     assert!(!want, "base-2 wrongly certified prime {n} composite");
                 }
             }
+        }
+    }
+
+    // Both variants of rho split products of two primes of 21 to 28 bits, the
+    // cofactors of the double large prime variation, and the binary gcd agrees with
+    // Euclid's.
+    #[test]
+    fn rho_splits_double_large_prime_cofactors() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut random_prime = |bits: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let start = (1u64 << (bits - 1)) | (seed % (1 << (bits - 1)));
+            (start..).find(|&p| is_prime_u64(p)).unwrap()
+        };
+        for i in 0..300 {
+            let (p, q) = (random_prime(21 + i % 8), random_prime(21 + (i / 8) % 8));
+            let n = p * q;
+            if p == q {
+                continue;
+            }
+            for d in [rho::<true>(n), rho::<false>(n), pollard_rho_u64(n)] {
+                assert!(d == p || d == q, "rho({n}) = {d}");
+            }
+        }
+        for (a, b) in [
+            (0u64, 0u64),
+            (0, 12),
+            (12, 0),
+            (48, 18),
+            (1 << 40, 3 << 38),
+            (97, 89),
+        ] {
+            let euclid = |mut a: u64, mut b: u64| {
+                while b != 0 {
+                    (a, b) = (b, a % b);
+                }
+                a
+            };
+            assert_eq!(gcd_u64(a, b), euclid(a, b), "gcd({a}, {b})");
         }
     }
 
