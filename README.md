@@ -29,9 +29,18 @@ binaries may not run on other machines.
 
 ## Usage
 
-`cargo run --release` factors the example numbers in `src/main.rs` (202, 251
-and 301 bits). There is no command-line interface yet; to factor your own
-number, edit `src/main.rs` or call the library:
+```sh
+cargo run --release -- 340282366920938463463374607431768211457   # 2^128 + 1
+cargo run --release -- -t 4 N1 N2   # with 4 sieving threads
+cargo run --release                 # the examples of 202, 251 and 301 bits
+```
+
+`siqs [-t THREADS] [N ...]` factors each `N` and prints it as a product of two
+factors, with the time taken. Without `N`, it factors the examples in
+`src/main.rs`. The default number of sieving threads is one less than the
+available parallelism, since the calling thread collects the relations.
+
+To call the library instead:
 
 ```rust
 use rug::Integer;
@@ -51,7 +60,8 @@ appear, then runs Block Lanczos. A prime factor of `n` below 1000, or the root
 
 The library logs its progress with the [`log`](https://docs.rs/log) crate, so
 it prints nothing unless the program sets up a logger; `src/main.rs` has a
-minimal one that prints to stdout.
+minimal one that prints to stdout. `cargo doc --open` shows the API
+documentation, with an overview of the algorithm.
 
 ### Environment variables
 
@@ -62,21 +72,24 @@ minimal one that prints to stdout.
 | `SIQS_PROFILE` | Print per-phase timings of the first sieving thread to stderr every 2000 polynomials. |
 | `SIQS_DUMP_MATRIX=path` | Write the relation matrix to `path` if Block Lanczos fails. |
 | `SIQS_BL_DEBUG` | Print the rank Block Lanczos finds. |
-| `SIQS_LOG` | Log level of `main`: `error`, `warn`, `info` (default), `debug` or `trace`. |
+| `SIQS_LOG` | Log level of `siqs`: `error`, `warn`, `info` (default), `debug` or `trace`. |
 
 ### Other binaries
 
 - `bench_sieve_block [bits [polynomials [block size in KiB ...]]]` times the sieve
   for several block sizes, on one thread, with the parameters and polynomials for a
   semiprime of the given size (default 301 bits).
-- `lanczos_repro` replays a matrix written by `SIQS_DUMP_MATRIX` through Block
-  Lanczos.
+- `lanczos_repro [path [seeds]]` replays a matrix written by `SIQS_DUMP_MATRIX`
+  through Block Lanczos, with `SIQS_FILTER` after removing the singleton relations,
+  and with `SIQS_MAX_ROWS=r` on its first `r` relations only;
+  `lanczos_repro synthetic [relations [columns [appearing]]]` uses a random matrix
+  shaped like a relation matrix instead.
 
 ## Performance
 
-`quadratic_sieve_lanczos` on the examples in `src/main.rs`, with 7 sieving
-threads on an AMD Ryzen 7 PRO 6850U laptop (8 cores). The total also includes
-setup and computing the factor from the dependencies.
+The examples in `src/main.rs` with 7 sieving threads (`siqs -t 7`), on an AMD
+Ryzen 7 PRO 6850U laptop (8 cores). The total also includes setup and computing
+the factor from the dependencies.
 
 | `n` | Factor base | Relations | Block Lanczos | Total |
 |---|---|---|---|---|
@@ -98,6 +111,7 @@ builds much faster.
 
 | File | Contents |
 |---|---|
+| `src/main.rs` | Command-line interface |
 | `src/sieve.rs` | Driver: sieving threads and relation collection |
 | `src/siqs_generator.rs` | Self-initializing polynomial generation |
 | `src/block_sieve.rs` | The sieve, in blocks, with buckets for the large primes |
