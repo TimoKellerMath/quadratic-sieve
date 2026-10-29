@@ -14,8 +14,8 @@ Factors each N with the self-initializing quadratic sieve and prints a factor.
 Without N, it factors the examples of 202, 251 and 301 bits.
 
 Options:
-  -t, --threads THREADS  the number of sieving threads; the default is one less
-                         than the available parallelism
+  -t, --threads THREADS  the number of sieving threads; the default is one per
+                         core
   -h, --help             print this help
 
 SIQS_LOG sets the log level: error, warn, info (the default), debug or trace.";
@@ -67,8 +67,10 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, St
             ),
         }
     }
-    // the calling thread collects the relations
-    let default_threads = || thread::available_parallelism().map_or(1, |n| n.get() - 1);
+    // one sieving thread per core (hardware threads sharing a core slow each other
+    // down); the calling thread, which collects the relations, needs little time
+    let default_threads =
+        || thread::available_parallelism().map_or(1, |n| n.get().min(siqs::machine::CORES));
     Ok(Some(Args {
         num_threads: num_threads.unwrap_or_else(default_threads).max(1),
         numbers,

@@ -1,3 +1,8 @@
+/// The number of cores. One sieving thread per core is the fastest: two hardware
+/// threads of a core slow each other down, since they share its L2 (at 301 bits, 8
+/// threads sieve 2.2% faster than 7, 14 threads 5.9% slower than 8).
+pub const CORES: usize = number(option_env!("SIQS_CORES"), 8);
+
 /// The size of a core's L1 data cache, in bytes.
 pub const L1D: usize = kib(option_env!("SIQS_L1D_KIB"), 32);
 
@@ -24,25 +29,27 @@ pub const fn sieve_block_size(l2: usize) -> usize {
 }
 
 /// `value` KiB in bytes, where `value` is a decimal number from the environment at
-/// compile time, or `default` KiB if it is not set. A malformed value fails the
-/// build.
+/// compile time, or `default` KiB if it is not set.
 const fn kib(value: Option<&str>, default: usize) -> usize {
+    number(value, default) << 10
+}
+
+/// `value`, a decimal number from the environment at compile time, or `default` if
+/// it is not set. A malformed value fails the build.
+const fn number(value: Option<&str>, default: usize) -> usize {
     let Some(value) = value else {
-        return default << 10;
+        return default;
     };
     let digits = value.as_bytes();
-    assert!(!digits.is_empty(), "a cache size must be a number of KiB");
-    let mut kib = 0usize;
+    assert!(!digits.is_empty(), "not a number");
+    let mut number = 0usize;
     let mut i = 0;
     while i < digits.len() {
-        assert!(
-            digits[i].is_ascii_digit(),
-            "a cache size must be a number of KiB"
-        );
-        kib = kib * 10 + (digits[i] - b'0') as usize;
+        assert!(digits[i].is_ascii_digit(), "not a number");
+        number = number * 10 + (digits[i] - b'0') as usize;
         i += 1;
     }
-    kib << 10
+    number
 }
 
 #[cfg(test)]
@@ -60,9 +67,11 @@ mod tests {
     }
 
     #[test]
-    fn cache_sizes_are_read_in_kib() {
+    fn sizes_are_read_from_decimal_numbers() {
         assert_eq!(kib(None, 32), 32 << 10);
         assert_eq!(kib(Some("1024"), 32), 1 << 20);
         assert_eq!(kib(Some("0"), 32), 0);
+        assert_eq!(number(Some("12"), 8), 12);
+        assert_eq!(number(None, 8), 8);
     }
 }

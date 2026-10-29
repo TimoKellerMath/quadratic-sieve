@@ -31,9 +31,9 @@ binaries may not run on other machines, and aligns loops to 64 bytes, so that
 the speed of the hot loops does not depend on where the code lands.
 
 The sieve is tuned for the caches of the machine in [Performance](#performance):
-32 KiB of L1d and 512 KiB of L2 per core, 16 MiB of L3. For another machine, set
-their sizes in KiB when compiling, e.g.
-`SIQS_L1D_KIB=48 SIQS_L2_KIB=2048 SIQS_L3_KIB=32768 cargo build --release`
+8 cores, 32 KiB of L1d and 512 KiB of L2 per core, 16 MiB of L3. For another
+machine, set the number of cores and the cache sizes in KiB when compiling, e.g.
+`SIQS_CORES=16 SIQS_L1D_KIB=48 SIQS_L2_KIB=2048 SIQS_L3_KIB=32768 cargo build --release`
 (see `src/machine.rs`).
 
 ## Usage
@@ -46,8 +46,10 @@ cargo run --release                 # the examples of 202, 251 and 301 bits
 
 `siqs [-t THREADS] [N ...]` factors each `N` and prints it as a product of two
 factors, with the time taken. Without `N`, it factors the examples in
-`src/main.rs`. The default number of sieving threads is one less than the
-available parallelism, since the calling thread collects the relations.
+`src/main.rs`. The default is one sieving thread per core (8, see
+`src/machine.rs`): two hardware threads of a core slow each other down, since
+they share its L2. The calling thread collects the relations, which takes little
+time.
 
 To call the library instead:
 
