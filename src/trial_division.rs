@@ -178,6 +178,18 @@ fn find_divisors(
     }
 }
 
+/// The bound lp_bound^exponent, at most lp_bound^2, of a cofactor with two large
+/// primes below `lp_bound`: msieve uses 1.8, YAFU 1.75 to 1.95 by the size of kn.
+/// The larger the cofactor, the costlier the split and the less likely its primes
+/// are to close a cycle.
+pub fn dlp_bound(lp_bound: u64, exponent: f64) -> u64 {
+    if exponent >= 2.0 {
+        lp_bound * lp_bound
+    } else {
+        (lp_bound as f64).powf(exponent) as u64
+    }
+}
+
 /// Trial division of the sieve's candidates over the factor base, with the bounds
 /// for large primes. It reuses its scratch across candidates, so every sieving
 /// thread has its own.
@@ -191,8 +203,11 @@ pub struct TrialDivision<'a> {
     // the length 2M of the sieve interval
     interval: usize,
     k: u32,
-    large_prime_multiplier: u32,
-    use_dlp: bool,
+    // the bound of a large prime, below the square of the largest factor-base prime
+    lp_bound: u64,
+    // with the double large prime variation, the bound of a cofactor with two large
+    // primes
+    dlp_bound: Option<u64>,
     // for each candidate of the current polynomial, the indices of the sieved primes
     // that divide Q there, in increasing order
     divisors: Vec<Vec<u32>>,
@@ -206,14 +221,16 @@ impl<'a> TrialDivision<'a> {
     /// Trial division over `factorbase`, with the `inverses` 1/p of its primes as
     /// f32, for the sieve interval [−M, M), M = `sieve_interval_length` < 2^23, and
     /// the multiplier `k`. Large primes are those below `large_prime_multiplier`
-    /// times the largest factor-base prime, and `use_dlp` admits two of them.
+    /// times the largest factor-base prime, which must be below that prime squared
+    /// and 2^32. With `dlp_bound`, the double large prime variation admits two of
+    /// them in a cofactor up to that bound.
     pub fn new(
         factorbase: &'a [u32],
         inverses: &'a [f32],
         sieve_interval_length: usize,
         k: u32,
         large_prime_multiplier: u32,
-        use_dlp: bool,
+        dlp_bound: Option<u64>,
     ) -> TrialDivision<'a> {
         // the AVX2 root check loads them unchecked
         assert_eq!(
@@ -228,14 +245,17 @@ impl<'a> TrialDivision<'a> {
         let large = factorbase
             .partition_point(|&p| (p as u64) < 2 * m)
             .max(medium);
+        let largest_prime = *factorbase.last().unwrap() as u64;
+        let lp_bound = largest_prime * large_prime_multiplier as u64;
+        debug_assert!(lp_bound < largest_prime * largest_prime && lp_bound < 1 << 32);
         TrialDivision {
             factorbase,
             inverses,
             ranges: [first..medium, medium..large, large..factorbase.len()],
             interval: 2 * sieve_interval_length,
             k,
-            large_prime_multiplier,
-            use_dlp,
+            lp_bound,
+            dlp_bound,
             divisors: Vec::new(),
             cofactor: Integer::new(),
             factors: Vec::new(),
@@ -363,17 +383,17 @@ impl<'a> TrialDivision<'a> {
         // every prime factor of y_u64 is larger than the largest factor-base prime
         let largest_prime = *factorbase.last().unwrap() as u64;
         debug_assert!(Integer::from(y_u64).gcd_u(self.k) == 1);
-        // large prime bound: largest_prime * lpm stays below 2^32, so a single large
-        // prime always fits in u32.
-        let lp_bound = largest_prime * self.large_prime_multiplier as u64;
         // single large prime variation: y_u64 has no factor <= largest_prime, and
         // lp_bound < largest_prime^2, so a value below lp_bound is necessarily prime.
+        // It fits in a u32.
+        let lp_bound = self.lp_bound;
         if y_u64 < lp_bound {
             return Some((factors.clone(), LargePrimes::one(y_u64 as u32)));
         }
         // double large prime variation: y_u64 is a product of large primes (it survived
         // trial division by the whole factor base). Accept it only if it splits into two
-        // primes, each below lp_bound, i.e. y_u64 is a semiprime <= lp_bound^2.
+        // primes, each below lp_bound, and is at most dlp_bound <= lp_bound^2. Below
+        // largest_prime^2 it is a prime.
         //
         // The common case here is a single prime cofactor > lp_bound (useless): the
         // base-2 test rejects it with one modular exponentiation, where the full
@@ -381,7 +401,11 @@ impl<'a> TrialDivision<'a> {
         // `false` result certifies compositeness, so the Pollard-rho split below is
         // guaranteed to terminate. p and q are <= lp_bound < 2^32, so the cheaper
         // 3-witness is_prime_u32 suffices to confirm them prime.
-        if self.use_dlp && y_u64 <= lp_bound * lp_bound && !is_probable_prime_base2(y_u64) {
+        let dlp_bound = self.dlp_bound?;
+        if y_u64 >= largest_prime * largest_prime
+            && y_u64 <= dlp_bound
+            && !is_probable_prime_base2(y_u64)
+        {
             let p = pollard_rho_u64(y_u64);
             let q = y_u64 / p;
             if p <= lp_bound && q <= lp_bound && is_prime_u32(p) && is_prime_u32(q) {
@@ -474,7 +498,7 @@ mod tests {
     fn root_check_rejects_missing_roots() {
         let factorbase = crate::factorbase::make_factorbase(&example_n(), 30);
         let inverses = crate::factorbase::compute_inverses(&factorbase);
-        let mut trial_division = TrialDivision::new(&factorbase, &inverses, 1000, 1, 40, false);
+        let mut trial_division = TrialDivision::new(&factorbase, &inverses, 1000, 1, 40, None);
         trial_division.find_divisors(&[1], &Roots::default());
     }
 
@@ -506,7 +530,8 @@ mod tests {
             &n_roots,
             &factorbase,
         );
-        let mut trial_division = TrialDivision::new(&factorbase, &inverses, m, 1, 40, true);
+        let mut trial_division =
+            TrialDivision::new(&factorbase, &inverses, m, 1, 40, Some(1 << 40));
         let ranges = trial_division.ranges.clone();
         assert!(
             ranges
@@ -557,6 +582,7 @@ mod tests {
         y: &Integer,
         factorbase: &[u32],
         large_prime_multiplier: u32,
+        dlp_bound: u64,
     ) -> Option<(Vec<u32>, LargePrimes)> {
         if *y == 0 {
             return None;
@@ -587,7 +613,7 @@ mod tests {
             return Some((factors, LargePrimes::one(m as u32)));
         }
         let is_prime = |x: u64| Integer::from(x).is_probably_prime(30) != rug::integer::IsPrime::No;
-        if m > bound * bound || is_prime(m) {
+        if m > dlp_bound || is_prime(m) {
             return None;
         }
         let mut p = (largest + 1) | 1;
@@ -607,16 +633,19 @@ mod tests {
 
     // At every position of the interval, trial division finds the same relation as
     // brute force: for an interval longer than the largest prime, where every
-    // position is reduced, and for a short one, where most primes exceed M or 2M.
-    // Every kind of outcome occurs.
+    // position is reduced, and for a short one, where most primes exceed M or 2M;
+    // and with the largest bound of a cofactor with two large primes, and a smaller
+    // one, which rejects some. Every kind of outcome occurs.
     #[test]
     fn trial_division_matches_brute_force() {
         let n = example_n();
         let factorbase = crate::factorbase::make_factorbase(&n, 300);
         let n_roots = crate::factorbase::square_roots_mod_factorbase(&n, &factorbase);
         let inverses = crate::factorbase::compute_inverses(&factorbase);
-        // none, full, one large prime, two large primes
-        let mut outcomes = [0usize; 4];
+        let large_prime_multiplier = 40;
+        let lp_bound = *factorbase.last().unwrap() as u64 * large_prime_multiplier as u64;
+        // none, full, one large prime, two large primes; by the bound
+        let mut outcomes = [[0usize; 4]; 2];
         for m in [65536usize, 1500] {
             let mut generators = crate::siqs_generator::new_polynomial_generators(
                 &n,
@@ -627,23 +656,37 @@ mod tests {
                 &factorbase,
             );
             let (polynomial, roots) = generators[0].next_polynomial();
-            let large_prime_multiplier = 40;
-            let mut trial_division =
-                TrialDivision::new(&factorbase, &inverses, m, 1, large_prime_multiplier, true);
-            let mut y = Integer::new();
-            let positions: Vec<u32> = (0..2 * m as u32).collect();
-            for batch in positions.chunks(64) {
-                trial_division.find_divisors(batch, roots);
-                for (candidate, &pos) in batch.iter().enumerate() {
-                    let x = pos as i32 - m as i32;
-                    polynomial.evaluate(x, &mut y);
-                    let got = trial_division.factor(candidate, &y);
-                    let want = brute_force_relation(&y, &factorbase, large_prime_multiplier);
-                    assert_eq!(got, want, "M = {m}, x = {x}");
-                    outcomes[want.map_or(0, |(_, large_primes)| 1 + large_primes.count())] += 1;
+            for (exponent, outcomes) in [2.0, 1.8].into_iter().zip(&mut outcomes) {
+                let bound = dlp_bound(lp_bound, exponent);
+                let mut trial_division = TrialDivision::new(
+                    &factorbase,
+                    &inverses,
+                    m,
+                    1,
+                    large_prime_multiplier,
+                    Some(bound),
+                );
+                let mut y = Integer::new();
+                let positions: Vec<u32> = (0..2 * m as u32).collect();
+                for batch in positions.chunks(64) {
+                    trial_division.find_divisors(batch, roots);
+                    for (candidate, &pos) in batch.iter().enumerate() {
+                        let x = pos as i32 - m as i32;
+                        polynomial.evaluate(x, &mut y);
+                        let got = trial_division.factor(candidate, &y);
+                        let want =
+                            brute_force_relation(&y, &factorbase, large_prime_multiplier, bound);
+                        assert_eq!(got, want, "M = {m}, x = {x}, exponent {exponent}");
+                        outcomes[want.map_or(0, |(_, large_primes)| 1 + large_primes.count())] += 1;
+                    }
                 }
             }
         }
+        assert!(
+            outcomes[1][3] < outcomes[0][3],
+            "the smaller bound rejects no cofactor: {outcomes:?}"
+        );
+        let outcomes = outcomes[1];
         assert!(
             outcomes.iter().all(|&count| count > 0),
             "outcomes (none, full, 1LP, 2LP): {outcomes:?}"

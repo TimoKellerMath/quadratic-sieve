@@ -19,7 +19,7 @@ use crate::multiplier::*;
 use crate::number_theory::*;
 use crate::relation::Relation;
 use crate::siqs_generator::*;
-use crate::trial_division::TrialDivision;
+use crate::trial_division::{TrialDivision, dlp_bound};
 
 /// A full or partial relation sent from a sieving thread to the collecting
 /// thread, with the index of the sieving thread.
@@ -94,6 +94,9 @@ struct SieveParams {
     sieve_interval_length: usize,
     large_prime_multiplier: u32,
     use_dlp: bool,
+    // with the double large prime variation, the bound of a cofactor with two large
+    // primes
+    dlp_bound: Option<u64>,
     // large-prime slack in bits: how much non-smooth cofactor a candidate may keep
     lp_slack: u32,
     // the sum of the logs of the factor-base entries the sieve skips
@@ -158,6 +161,13 @@ impl SieveParams {
                 && largest_prime * large_prime_multiplier as u64 <= u32::MAX as u64,
             "large-prime multiplier {large_prime_multiplier} out of range"
         );
+        // the bound of a cofactor with two large primes, lp_bound^SIQS_DLP_EXP
+        let dlp_exponent = env_override("SIQS_DLP_EXP").unwrap_or(2.0);
+        let dlp_bound =
+            use_dlp.then(|| dlp_bound(largest_prime * large_prime_multiplier as u64, dlp_exponent));
+        if use_dlp {
+            info!("double large prime cofactors up to lp_bound^{dlp_exponent}");
+        }
         let lp_slack = lp_slack_bits(
             use_dlp,
             n_bits,
@@ -180,6 +190,7 @@ impl SieveParams {
             sieve_interval_length,
             large_prime_multiplier,
             use_dlp,
+            dlp_bound,
             lp_slack,
             skipped_logs: skipped,
             blocking: Blocking::with_size(block_size),
@@ -225,7 +236,7 @@ fn run_sieve_producer(
         sieve_interval_length,
         params.k,
         params.large_prime_multiplier,
-        params.use_dlp,
+        params.dlp_bound,
     );
     // Q(x) of a candidate, reused across candidates; cloned out only on a hit
     let mut v = Integer::new();
