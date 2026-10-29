@@ -105,15 +105,16 @@ documentation, with an overview of the algorithm.
 
 ## Performance
 
-The examples in `src/main.rs` with 7 sieving threads (`siqs -t 7`), on an AMD
-Ryzen 7 PRO 6850U laptop (8 cores). The total also includes setup and computing
-the factor from the dependencies.
+The examples in `src/main.rs` with the default of 8 sieving threads (`siqs`), on
+an AMD Ryzen 7 PRO 6850U laptop (8 cores), one run each; the laptop throttles, so
+times vary by about 10%. The total also includes setup and computing the factor
+from the dependencies.
 
 | `n` | Factor base | Relations | Block Lanczos | Total |
 |---|---|---|---|---|
-| 202 bits | 4,600 | 0.89 s | 0.03 s | 0.97 s |
-| 251 bits | 32,412 | 20.7 s | 0.60 s | 22.2 s |
-| 301 bits | 67,059 | 703 s | 3.2 s | 712 s |
+| 202 bits | 4,600 | 0.35 s | 0.03 s | 0.41 s |
+| 251 bits | 32,412 | 9.7 s | 0.78 s | 10.8 s |
+| 301 bits | 67,059 | 221 s | 5.5 s | 228 s |
 
 ## Tests
 
