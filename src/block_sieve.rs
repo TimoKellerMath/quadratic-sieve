@@ -41,56 +41,68 @@ pub fn skipped_logs(logs: &[u8]) -> u32 {
         .sum()
 }
 
-/// Per-block buckets of large-prime hits for [`sieve_over_factorbase_blocked`], in one
-/// flat array: bucket `b` occupies `data[b * stride..ends[b]]`. The stride covers every
-/// hit a block can get, so the fill needs no capacity or bounds checks.
+/// The buckets of large-prime hits for [`sieve_over_factorbase_blocked`], one per log
+/// class and region: the large primes fall into classes of equal logs, and the
+/// interval into regions of at most 2^16 positions, so that an entry is just the
+/// offset of a hit in its region, two bytes, and the bucket's class gives the log.
+/// Bucket `j` occupies `data[starts[j]..ends[j]]`, with room up to `limits[j]` for
+/// every hit its class can put into its region, so the fill needs no capacity or
+/// bounds checks.
 #[derive(Default)]
 struct Buckets {
-    data: Vec<u32>,
+    data: Vec<u16>,
+    starts: Vec<usize>,
     ends: Vec<usize>,
-    stride: usize,
+    limits: Vec<usize>,
 }
 
 impl Buckets {
-    // empty `num_blocks` buckets with room for `stride` entries each
-    fn reset(&mut self, num_blocks: usize, stride: usize) {
-        if self.data.len() < num_blocks * stride {
-            // a zeroed allocation: pages that are never written are never touched
-            self.data = vec![0; num_blocks * stride];
-        }
-        self.stride = stride;
+    // empty buckets for classes of the given numbers of primes, `regions` per class,
+    // with room for two hits per prime, one per root
+    fn reset(&mut self, class_sizes: impl Iterator<Item = usize>, regions: usize) {
+        self.starts.clear();
         self.ends.clear();
-        self.ends.extend((0..num_blocks).map(|b| b * stride));
+        self.limits.clear();
+        let mut start = 0;
+        for size in class_sizes {
+            for _ in 0..regions {
+                self.starts.push(start);
+                self.ends.push(start);
+                start += 2 * size;
+                self.limits.push(start);
+            }
+        }
+        if self.data.len() < start {
+            // a zeroed allocation: pages that are never written are never touched
+            self.data = vec![0; start];
+        }
     }
 
-    // the hits that fall into block `b`
-    fn block(&self, b: usize) -> &[u32] {
-        debug_assert!(
-            self.ends[b] <= (b + 1) * self.stride,
-            "bucket {b} overflowed"
-        );
-        &self.data[b * self.stride..self.ends[b]]
+    // the hits in bucket `j`
+    fn bucket(&self, j: usize) -> &[u16] {
+        debug_assert!(self.ends[j] <= self.limits[j], "bucket {j} overflowed");
+        &self.data[self.starts[j]..self.ends[j]]
     }
 }
 
-/// Appends `entry` to bucket `block` of the flat arrays of a [`Buckets`].
+/// Appends `entry` to bucket `bucket` of the flat arrays of a [`Buckets`].
 ///
 /// # Safety
 ///
-/// `block` must be below the number of buckets, and the bucket must have room.
+/// `bucket` must be below the number of buckets, and the bucket must have room.
 #[inline(always)]
-unsafe fn push_hit(data: *mut u32, ends: *mut usize, block: usize, entry: u32) {
+unsafe fn push_hit(data: *mut u16, ends: *mut usize, bucket: usize, entry: u16) {
     // SAFETY: guaranteed by the caller
     unsafe {
-        let end = ends.add(block);
+        let end = ends.add(bucket);
         *data.add(*end) = entry;
         *end += 1;
     }
 }
 
 /// The factor base as [`sieve_over_factorbase_blocked`] sees it: the primes, sorted
-/// ascending, their logs, and the index of the first prime it sieves, at least
-/// [`NUM_SKIP_PRIMES`]. With the small prime variation, it skips more of the
+/// ascending, their logs, which must not decrease (as rounded logs do), and the index
+/// of the first prime it sieves, at least [`NUM_SKIP_PRIMES`]. With the small prime variation, it skips more of the
 /// smallest primes than those, whose many hits cost more than their logs are worth.
 #[derive(Clone, Copy, Debug)]
 pub struct SievedPrimes<'a> {
@@ -200,11 +212,12 @@ unsafe fn carry_walk(
 /// held. A prime up to the block size hits every block, so it is walked through each
 /// block from where the previous block left off, the smallest ones (see
 /// [`Blocking`]) through each sub-block. A larger prime hits a block at most once
-/// per root, so its hits are sorted into one bucket per block first, which the block
-/// then drains: this costs a step per hit instead of one per prime and block.
+/// per root, so its hits are sorted into buckets first, by its log and the region of
+/// the hit (see [`Buckets`]), which the block then drains: this costs a step per hit
+/// instead of one per prime and block.
 ///
-/// `roots` belong to the primes of `factorbase`. 2M < 2^24, and `scratch` is
-/// reused across calls.
+/// `roots` belong to the primes of `factorbase`, and `scratch` is reused across
+/// calls.
 pub fn sieve_over_factorbase_blocked(
     sieve_interval_length: usize,
     factorbase: SievedPrimes,
@@ -247,38 +260,53 @@ pub fn sieve_over_factorbase_blocked(
     let prof_t0 = profile.then(std::time::Instant::now);
 
     // --- bucket the hits of the large primes (p > block_size) ---
-    // each root of a prime larger than a block hits that block at most once
-    buckets.reset(num_blocks, 2 * (factorbase.len() - split));
-    let data = buckets.data.as_mut_ptr();
-    let ends = buckets.ends.as_mut_ptr();
-    // An entry packs the position into its low 24 bits and the log into the high 8:
-    // 4 bytes instead of 8 for a separate position and log keep the fill's writes,
-    // the bulk of the setup, in the cache longer.
-    debug_assert!(total_len < (1 << 24));
-    for (((&p, &root1), &root2), &log) in factorbase[split..]
-        .iter()
-        .zip(&roots.r1[split..])
-        .zip(&roots.r2[split..])
-        .zip(&logs[split..])
+    // the classes of large primes with equal logs, [class_starts[c], class_starts[c + 1])
+    let mut class_starts = vec![split];
+    while let Some(&start) = class_starts.last()
+        && start < factorbase.len()
     {
-        if root1 == Roots::NONE {
-            continue;
-        }
-        let log_packed = (log as u32) << 24;
-        let p_us = p as usize;
-        let mut pos = root1 as usize;
-        while pos < total_len {
-            // SAFETY: pos < total_len, so the block index is below num_blocks, and
-            // the stride leaves room for every hit
-            unsafe { push_hit(data, ends, pos >> block_shift, pos as u32 | log_packed) };
-            pos += p_us;
-        }
-        if root2 != root1 {
-            let mut pos = root2 as usize;
+        let log = logs[start];
+        let end = start + logs[start..].partition_point(|&l| l <= log);
+        debug_assert!(logs[start..end].iter().all(|&l| l == log), "logs decrease");
+        class_starts.push(end);
+    }
+    let num_classes = class_starts.len() - 1;
+    // the regions, at most 2^16 positions and at most a block, so that a prime larger
+    // than a block hits each at most once per root
+    let region_shift = block_shift.min(16);
+    let region_mask = (1 << region_shift) - 1;
+    let num_regions = total_len.div_ceil(1 << region_shift);
+    buckets.reset(class_starts.windows(2).map(|c| c[1] - c[0]), num_regions);
+    let data = buckets.data.as_mut_ptr();
+    for class in 0..num_classes {
+        // SAFETY: the buckets of the class are within the buckets
+        let ends = unsafe { buckets.ends.as_mut_ptr().add(class * num_regions) };
+        let primes = class_starts[class]..class_starts[class + 1];
+        for ((&p, &root1), &root2) in factorbase[primes.clone()]
+            .iter()
+            .zip(&roots.r1[primes.clone()])
+            .zip(&roots.r2[primes])
+        {
+            let p = p as usize;
+            if root1 == Roots::NONE {
+                continue;
+            }
+            let mut pos = root1 as usize;
             while pos < total_len {
-                // SAFETY: as above
-                unsafe { push_hit(data, ends, pos >> block_shift, pos as u32 | log_packed) };
-                pos += p_us;
+                // SAFETY: pos < total_len, so the region is below num_regions, and
+                // the bucket has room for every hit
+                unsafe { push_hit(data, ends, pos >> region_shift, (pos & region_mask) as u16) };
+                pos += p;
+            }
+            if root2 != root1 {
+                let mut pos = root2 as usize;
+                while pos < total_len {
+                    // SAFETY: as above
+                    unsafe {
+                        push_hit(data, ends, pos >> region_shift, (pos & region_mask) as u16)
+                    };
+                    pos += p;
+                }
             }
         }
     }
@@ -314,9 +342,7 @@ pub fn sieve_over_factorbase_blocked(
     if block.len() < block_size.min(total_len) {
         block.resize(block_size.min(total_len), 0);
     }
-    // a bucket entry's position within its block (blocks start at multiples of
-    // block_size)
-    let offset_mask = (block_size - 1) & 0x00FF_FFFF;
+    let regions_per_block = 1 << (block_shift - region_shift);
     for block_idx in 0..num_blocks {
         let block_start = block_idx << block_shift;
         let block_len = block_size.min(total_len - block_start);
@@ -350,12 +376,22 @@ pub fn sieve_over_factorbase_blocked(
                 block_len,
             );
         }
-        // drain the large-prime hits that fall in this block
-        for &packed in buckets.block(block_idx) {
-            // SAFETY: the entries of bucket block_idx hold positions of this block
-            unsafe {
-                let slot = buf_ptr.add(packed as usize & offset_mask);
-                *slot = (*slot).wrapping_add((packed >> 24) as u8);
+        // drain the large-prime hits that fall in this block, class by class and
+        // region by region
+        let first_region = block_idx * regions_per_block;
+        let last_region = (first_region + regions_per_block).min(num_regions);
+        for class in 0..num_classes {
+            let log = logs[class_starts[class]];
+            for region in first_region..last_region {
+                let base = (region - first_region) << region_shift;
+                for &offset in buckets.bucket(class * num_regions + region) {
+                    // SAFETY: the hits of the region lie in this block, below
+                    // block_len
+                    unsafe {
+                        let slot = buf_ptr.add(base + offset as usize);
+                        *slot = (*slot).wrapping_add(log);
+                    }
+                }
             }
         }
         let prof_t = profile.then(std::time::Instant::now);
@@ -496,5 +532,81 @@ mod tests {
             assert_eq!(next_start, total_len);
             assert_eq!(buf, want, "mismatch for {blocking:?}, first {first}");
         }
+    }
+
+    // Blocks of 128 KiB, each with two regions of 2^16 positions, and large primes of
+    // several logs, so several bucket classes, also in the partial last block.
+    #[test]
+    fn large_blocks_with_several_regions_match_reference() {
+        // the odd primes up to 1000, then every 40th up to 600,000
+        let limit = 600_000usize;
+        let mut composite = vec![false; limit];
+        let mut primes = vec![0u32, 2];
+        let mut larger = 0;
+        for p in (3..limit).step_by(2) {
+            if composite[p] {
+                continue;
+            }
+            for q in (p * p..limit).step_by(2 * p) {
+                composite[q] = true;
+            }
+            if p < 1000 {
+                primes.push(p as u32);
+            } else {
+                larger += 1;
+                if larger % 40 == 0 {
+                    primes.push(p as u32);
+                }
+            }
+        }
+        let factorbase = primes;
+        let mut roots = Roots::default();
+        let mut seed = 0x00DD_BA11_u64;
+        for (i, &p) in factorbase.iter().enumerate() {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            if i < NUM_SKIP_PRIMES {
+                roots.push(None);
+            } else {
+                let (r1, r2) = ((seed % p as u64) as u32, ((seed >> 21) % p as u64) as u32);
+                roots.push(Some((r1, if i % 29 == 0 { r1 } else { r2 })));
+            }
+        }
+        let logs: Vec<u8> = factorbase
+            .iter()
+            .map(|&p| ((p.max(2) as f32).log2().round() as u8).max(1))
+            .collect();
+        let large_logs: std::collections::HashSet<u8> = factorbase
+            .iter()
+            .zip(&logs)
+            .filter(|&(&p, _)| p > 1 << 17)
+            .map(|(_, &log)| log)
+            .collect();
+        assert!(large_logs.len() >= 3, "classes: {large_logs:?}");
+        // 2M = 300,000: two full blocks of 2^17 and a partial one
+        let sieve_interval_length = 150_000;
+        let want = reference_sieve(
+            sieve_interval_length,
+            &factorbase,
+            &roots,
+            &logs,
+            NUM_SKIP_PRIMES,
+        );
+        let mut buf = vec![0u8; 2 * sieve_interval_length];
+        let primes = SievedPrimes {
+            primes: &factorbase,
+            logs: &logs,
+            first: NUM_SKIP_PRIMES,
+        };
+        sieve_over_factorbase_blocked(
+            sieve_interval_length,
+            primes,
+            &roots,
+            &mut SieveScratch::default(),
+            Blocking::with_size(1 << 17),
+            |block_start, sums| buf[block_start..block_start + sums.len()].copy_from_slice(sums),
+        );
+        assert!(buf == want, "the sums differ");
     }
 }

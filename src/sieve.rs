@@ -128,7 +128,7 @@ impl SieveParams {
         let large_prime_multiplier = env_override("SIQS_LP_MULT").unwrap_or(large_prime_multiplier);
         let block_size =
             env_override::<usize>("SIQS_BLOCK_KIB").map_or(SIEVE_BLOCK_SIZE, |kib| kib << 10);
-        // the bucket entries pack a position of the interval into 24 bits
+        // trial division reduces positions as f32, which are exact below 2^24
         assert!(
             (1..1 << 23).contains(&sieve_interval_length),
             "sieve interval half-length {sieve_interval_length} not in [1, 2^23)"
