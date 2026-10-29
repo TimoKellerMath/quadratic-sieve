@@ -35,8 +35,8 @@ the speed of the hot loops does not depend on where the code lands.
 The sieve is tuned for the caches of the machine in [Performance](#performance):
 8 cores, 32 KiB of L1d and 512 KiB of L2 per core, 16 MiB of L3. For another
 machine, set the number of cores and the cache sizes in KiB when compiling, e.g.
-`SIQS_CORES=16 SIQS_L1D_KIB=48 SIQS_L2_KIB=2048 SIQS_L3_KIB=32768 cargo build --release`
-(see `src/machine.rs`).
+`SIQS_CORES=16 SIQS_L1D_KIB=48 SIQS_L2_KIB=2048 cargo build --release`
+(see `src/machine.rs`; the L3 size, `SIQS_L3_KIB`, is recorded but not used yet).
 
 ## Usage
 
@@ -81,7 +81,7 @@ documentation, with an overview of the algorithm.
 | Variable | Effect |
 |---|---|
 | `SIQS_LP_SLACK` | Sieve threshold slack, in units of the large-prime bound's log. Defaults: 0.75, or 1.3 to 1.7 with the double large prime variation, depending on the size of `n`. |
-| `SIQS_GLOBAL_THRESHOLD` | Use one threshold for the whole sieve interval instead of one per block. |
+| `SIQS_GLOBAL_THRESHOLD` | Use one threshold for the whole sieve interval instead of one per scan window of 16384 positions. |
 | `SIQS_FB_SIZE`, `SIQS_M`, `SIQS_LP_MULT` | Override the factor base size, the half-length M of the sieve interval [−M, M) and the large-prime multiplier of the parameter table, for parameter sweeps. |
 | `SIQS_DLP` | `1` or `0` turns the double large prime variation on or off; by default it is on above 250 bits. |
 | `SIQS_DLP_EXP` | A cofactor with two large primes may be up to the large-prime bound to this power, at most 2; 1.85 by default. |
@@ -118,12 +118,13 @@ the factor from the dependencies.
 ## Tests
 
 ```sh
-cargo test --profile profiling
+cargo test
 cargo test --profile profiling --test factoring -- --ignored   # 202- and 250-bit cases
 ```
 
-The `profiling` profile is optimized like `release` but without fat LTO, so it
-builds much faster.
+The `test` profile is optimized and keeps the debug assertions, which check
+costly invariants. The `profiling` profile is optimized like `release` but
+without fat LTO, so it builds much faster.
 
 ## Source overview
 

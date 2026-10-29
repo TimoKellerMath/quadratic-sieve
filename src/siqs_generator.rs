@@ -353,7 +353,10 @@ impl<'a> SIQSPolynomialData<'a> {
                     let bainv2jp = (b.mod_u(p) as u64 * (ainvp.get() as u64 * 2) % p as u64) as u32;
                     bainv2ips.push(bainv2jp);
                 } else {
-                    bainv2ips.push(0); // dummy: q_inv_mod_ps is None here, never read
+                    // dummy: q_inv_mod_ps is None here; it must stay 0, since the
+                    // root update adds it before replacing these roots by the
+                    // linear ones
+                    bainv2ips.push(0);
                 }
             }
         }

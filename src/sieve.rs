@@ -9,7 +9,7 @@ use rug::{Complete, Integer};
 
 use crate::block_sieve::{
     Blocking, SIEVE_CALLS, SIEVE_LOOP_NANOS, SIEVE_SETUP_NANOS, SieveScratch, SievedPrimes,
-    sieve_over_factorbase_blocked, skipped_logs,
+    sieve_over_factorbase_blocked, skipped_logs, small_prime_bound,
 };
 use crate::constants::NUM_SKIP_PRIMES;
 use crate::factorbase::*;
@@ -37,7 +37,8 @@ type RelationMsg = (Relation, usize);
 /// optimum at 202 bits. With it, the optimum grows with n, since larger cofactors make
 /// partials more valuable, and since trial division of a candidate became cheap, it
 /// is high: about 1.3 for n of 252 bits (1.2 to 1.5 within noise), 1.7 at 282 and
-/// 1.65 at 302 bits (the examples called 251, 281 and 301 bits, measured with the
+/// 1.65 at 302 bits (the examples called 251 and 301 bits in `src/main.rs`, and
+/// nextprime(2^140) · nextprime(2^141) for 281 bits, measured with the
 /// DLP exponent 1.85 and the small prime variation), interpolated linearly in
 /// between and clamped outside. `SIQS_LP_SLACK` overrides
 /// it, e.g. `SIQS_LP_SLACK=1.5`, for parameter sweeps.
@@ -93,7 +94,7 @@ fn env_override<T: std::str::FromStr>(name: &str) -> Option<T> {
         .and_then(|value| value.parse().ok())
 }
 
-/// Whether `SIQS_GLOBAL_THRESHOLD` is set, which replaces the per-block thresholds by
+/// Whether `SIQS_GLOBAL_THRESHOLD` is set, which replaces the per-window thresholds by
 /// one for the whole interval, from log2(kn/a), to compare the two.
 fn use_global_threshold() -> bool {
     static GLOBAL: OnceLock<bool> = OnceLock::new();
@@ -208,12 +209,9 @@ impl SieveParams {
         );
         let skipped = skipped_logs(&logs);
         // the small prime variation: the sieve leaves the primes up to the bound to
-        // the second stage of the scan, for factor bases large enough that it pays
-        // (msieve: from 800 primes). Up to 256, as in YAFU, measured: 301 bits
-        // +13.5% polynomials per second, 251 bits +4.4%; up to 512: +2% more at 301
-        // bits, within noise.
-        let default_spv_bound = if factorbase.len() >= 1000 { 256 } else { 0 };
-        let spv_bound: u32 = env_override("SIQS_SPV_BOUND").unwrap_or(default_spv_bound);
+        // the second stage of the scan
+        let spv_bound: u32 =
+            env_override("SIQS_SPV_BOUND").unwrap_or(small_prime_bound(factorbase.len()));
         let first_sieved = factorbase
             .partition_point(|&p| p <= spv_bound)
             .max(NUM_SKIP_PRIMES);
@@ -573,6 +571,11 @@ pub fn quadratic_sieve_lanczos(
         return Ok(Some(factor));
     }
     let num_threads = num_threads.max(1);
+    // the profile counters of the sieve, which earlier factorizations of this
+    // process have counted up
+    for counter in [&SIEVE_SETUP_NANOS, &SIEVE_LOOP_NANOS, &SIEVE_CALLS] {
+        counter.store(0, Ordering::Relaxed);
+    }
     let params = SieveParams::new(n)?;
     let mut polynomial_generators = params.polynomial_generators(num_threads);
     let relations = thread::scope(|s| {

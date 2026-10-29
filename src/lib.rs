@@ -61,8 +61,9 @@ pub mod linalg;
 /// The defaults describe the machine on which the parameters were measured, an AMD
 /// Ryzen 7 PRO 6850U (Zen 3+, 8 cores with 2 hardware threads each): 32 KiB of L1d
 /// and 512 KiB of L2 per core, and 16 MiB of L3 shared by all cores. For another
-/// machine, set `SIQS_CORES`, and `SIQS_L1D_KIB`, `SIQS_L2_KIB` or `SIQS_L3_KIB` (in
-/// KiB) when compiling, e.g. `SIQS_L2_KIB=1024 cargo build --release`. The SIMD code
+/// machine, set `SIQS_CORES`, and `SIQS_L1D_KIB` or `SIQS_L2_KIB` (in KiB) when
+/// compiling, e.g. `SIQS_L2_KIB=1024 cargo build --release` (`SIQS_L3_KIB` is
+/// recorded, but no parameter depends on it yet). The SIMD code
 /// is chosen at compile time too, by the target features (`target-cpu=native` in
 /// `.cargo/config.toml`).
 pub mod machine;

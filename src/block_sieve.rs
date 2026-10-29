@@ -31,9 +31,10 @@ pub struct SieveScratch {
     block: Vec<u8>,
 }
 
-/// The sum of the logs of the factor-base entries that
-/// [`sieve_over_factorbase_blocked`] skips (see [`NUM_SKIP_PRIMES`]), which the
-/// sieve threshold has to account for.
+/// The sum of the logs of the first [`NUM_SKIP_PRIMES`] factor-base entries, which
+/// are never sieved, and which the sieve threshold assumes to divide every value.
+/// (The small prime variation skips further primes, whose logs the scan adds back
+/// exactly, see [`small_prime_bound`].)
 pub fn skipped_logs(logs: &[u8]) -> u32 {
     logs[..NUM_SKIP_PRIMES.min(logs.len())]
         .iter()
@@ -98,6 +99,15 @@ unsafe fn push_hit(data: *mut u16, ends: *mut usize, bucket: usize, entry: u16) 
         *data.add(*end) = entry;
         *end += 1;
     }
+}
+
+/// The largest prime that the small prime variation leaves unsieved, for a factor
+/// base of `size` primes: 256, as in YAFU, for factor bases large enough that it
+/// pays (msieve: from 800 primes), else none. Measured with 8 threads: +13.5%
+/// polynomials per second at 301 bits, +4.4% at 251 bits; up to 512, 2% more at 301
+/// bits, within noise.
+pub fn small_prime_bound(size: usize) -> u32 {
+    if size >= 1000 { 256 } else { 0 }
 }
 
 /// The factor base as [`sieve_over_factorbase_blocked`] sees it: the primes, sorted
@@ -232,8 +242,8 @@ unsafe fn carry_walk(
 /// block from where the previous block left off, the smallest ones (see
 /// [`Blocking`]) through each sub-block. A larger prime hits a block at most once
 /// per root, so its hits are sorted into buckets first, by its log and the region of
-/// the hit (see [`Buckets`]), which the block then drains: this costs a step per hit
-/// instead of one per prime and block.
+/// the hit, which the block then drains: this costs a step per hit instead of one
+/// per prime and block.
 ///
 /// `roots` belong to the primes of `factorbase`, and `scratch` is reused across
 /// calls.

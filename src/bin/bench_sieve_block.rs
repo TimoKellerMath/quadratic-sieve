@@ -6,7 +6,9 @@
 // Usage: bench_sieve_block [bits [polynomials [block size in KiB ...]]]
 // Defaults: 301 bits, 1000 polynomials, block sizes of 16 to 512 KiB.
 use rug::Integer;
-use siqs::block_sieve::{Blocking, SieveScratch, SievedPrimes, sieve_over_factorbase_blocked};
+use siqs::block_sieve::{
+    Blocking, SieveScratch, SievedPrimes, sieve_over_factorbase_blocked, small_prime_bound,
+};
 use siqs::constants::NUM_SKIP_PRIMES;
 use siqs::factorbase::{compute_logs, make_factorbase, square_roots_mod_factorbase};
 use siqs::multiplier::{compute_multiplier, compute_sieve_parameters};
@@ -50,12 +52,12 @@ fn main() {
     factorbase.dedup();
     let square_roots = square_roots_mod_factorbase(&kn, &factorbase);
     let logs = compute_logs(&factorbase);
-    // SIQS_SPV_BOUND: the sieve skips the primes up to it, as with the small prime
-    // variation
+    // the small prime variation skips the primes up to the bound, which
+    // SIQS_SPV_BOUND overrides as in the sieve
     let spv_bound: u32 = std::env::var("SIQS_SPV_BOUND")
         .ok()
         .and_then(|bound| bound.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or(small_prime_bound(factorbase.len()));
     let primes = SievedPrimes::new(
         &factorbase,
         &logs,

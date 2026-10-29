@@ -62,8 +62,8 @@ fn symmetric_difference(a: &[u32], b: &[u32]) -> Vec<u32> {
 /// The large primes left in a relation: none, one or two.
 ///
 /// Stored in two slots with `a <= b`, where an empty slot holds 1 (no prime equals
-/// 1), so that the larger prime `b` is the pivot used by
-/// [`crate::large_primes::PartialRelations`].
+/// 1): then [`crate::large_primes::PartialRelations`] can read the pair as an edge
+/// between two vertices of its graph, 1 standing for no prime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LargePrimes {
     a: u32,
@@ -105,10 +105,10 @@ impl LargePrimes {
     }
 
     // symmetric difference: primes appearing an odd number of times across the two
-    // sets. The two sets always share their pivot, so the result has at most two
-    // elements. Computed by odd-count over all four slots (order-independent: a
-    // running 2-slot toggle could transiently overflow before the shared pivot
-    // cancels).
+    // sets. Combining along a cycle, the two sets always share a vertex (a prime, or
+    // the empty slot), so the result has at most two elements. Computed by odd-count
+    // over all four slots (order-independent: a running 2-slot toggle could
+    // transiently overflow before the shared element cancels).
     pub(crate) fn symmetric_difference(self, other: LargePrimes) -> LargePrimes {
         let vals = [self.a, self.b, other.a, other.b];
         let mut out = [1u32; 2];
