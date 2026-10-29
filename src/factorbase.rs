@@ -19,20 +19,14 @@ pub fn make_factorbase(n: &Integer, size: usize) -> Vec<u32> {
     factorbase
 }
 
-/// The Barrett reciprocals floor(2^64 / p) of the factor-base primes, with which trial
-/// division computes x mod p by a multiplication and a shift instead of a division.
-/// The entry for −1 is 0; trial division reads only those from
+/// The inverses 1/p of the factor-base primes as f32, with which trial division
+/// reduces a position modulo p by a multiplication instead of a division. The entry
+/// for −1 is 0; trial division reads only those from
 /// [`NUM_SKIP_PRIMES`](crate::constants::NUM_SKIP_PRIMES) on.
-pub fn compute_reciprocals(factorbase: &[u32]) -> Vec<u64> {
+pub fn compute_inverses(factorbase: &[u32]) -> Vec<f32> {
     factorbase
         .iter()
-        .map(|&p| {
-            if p >= 2 {
-                ((1u128 << 64) / p as u128) as u64
-            } else {
-                0
-            }
-        })
+        .map(|&p| if p >= 2 { 1.0 / p as f32 } else { 0.0 })
         .collect()
 }
 
@@ -141,16 +135,16 @@ mod tests {
     }
 
     #[test]
-    fn reciprocals_are_floor_of_2_64_over_p() {
+    fn inverses_are_rounded_one_over_p() {
         let factorbase = make_factorbase(&example_n(), 500);
-        let reciprocals = compute_reciprocals(&factorbase);
+        let inverses = compute_inverses(&factorbase);
         // the -1 sentinel has none
-        assert_eq!(reciprocals[0], 0);
-        for (&p, &m) in factorbase.iter().zip(&reciprocals).skip(1) {
-            let (p, m) = (p as u128, m as u128);
+        assert_eq!(inverses[0], 0.0);
+        for (&p, &inverse) in factorbase.iter().zip(&inverses).skip(1) {
+            let error = (inverse as f64 - 1.0 / p as f64).abs();
             assert!(
-                m * p <= 1 << 64 && (m + 1) * p > 1 << 64,
-                "reciprocal of {p}"
+                error <= 1.0 / p as f64 * f32::EPSILON as f64 / 2.0,
+                "inverse of {p}"
             );
         }
     }

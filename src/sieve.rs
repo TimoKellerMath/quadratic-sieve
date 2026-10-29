@@ -83,10 +83,10 @@ struct SieveParams {
     k: u32,
     kn: Integer,
     // the factor base (including the primes dividing k), and the rounded logs, the
-    // Barrett reciprocals and the square roots of kn modulo its primes
+    // inverses 1/p and the square roots of kn modulo its primes
     factorbase: Vec<u32>,
     logs: Vec<u8>,
-    reciprocals: Vec<u64>,
+    inverses: Vec<f32>,
     square_roots: Vec<u32>,
     // the factor base without the primes dividing k, from which a is built
     factorbase_without_k: Vec<u32>,
@@ -139,8 +139,8 @@ impl SieveParams {
         factorbase.dedup();
         let square_roots = square_roots_mod_factorbase(&kn, &factorbase);
         let logs = compute_logs(&factorbase);
-        // Barrett reciprocals for the resieve step's per-prime `x mod p`.
-        let reciprocals = compute_reciprocals(&factorbase);
+        // for trial division's reduction of a position modulo p
+        let inverses = compute_inverses(&factorbase);
         // double large prime variation: only worthwhile for larger n, where non-smooth
         // cofactors are big enough that admitting two large primes pays for the extra
         // primality test / Pollard-rho split and the larger partial-relation graph.
@@ -170,7 +170,7 @@ impl SieveParams {
             kn,
             factorbase,
             logs,
-            reciprocals,
+            inverses,
             square_roots,
             factorbase_without_k,
             sieve_interval_length,
@@ -212,7 +212,8 @@ fn run_sieve_producer(
     let mut candidates = Vec::new();
     let mut trial_division = TrialDivision::new(
         &params.factorbase,
-        &params.reciprocals,
+        &params.inverses,
+        sieve_interval_length,
         params.k,
         params.large_prime_multiplier,
         params.use_dlp,
@@ -288,10 +289,11 @@ fn run_sieve_producer(
             );
         }
         prof_candidates += candidates.len() as u64;
-        for &i in &candidates {
+        trial_division.find_divisors(&candidates, roots);
+        for (candidate, &i) in candidates.iter().enumerate() {
             let x = (i as i32) - (sieve_interval_length as i32);
             polynomial.evaluate(x, &mut v);
-            if let Some((factors, large_primes)) = trial_division.factor(i as u32, &v, roots) {
+            if let Some((factors, large_primes)) = trial_division.factor(candidate, &v) {
                 prof_relations[large_primes.count()] += 1;
                 let relation = Relation {
                     u: polynomial.sqrt_mod(x, &params.kn),
@@ -335,7 +337,7 @@ fn run_sieve_producer(
 /// Appends `offset + i` to `candidates` for every position `i` whose sieve value
 /// `logs[i]` reaches `threshold`, in increasing order.
 #[cfg(target_feature = "avx2")]
-fn find_candidates(logs: &[u8], threshold: u8, offset: usize, candidates: &mut Vec<usize>) {
+fn find_candidates(logs: &[u8], threshold: u8, offset: usize, candidates: &mut Vec<u32>) {
     use std::arch::x86_64::*;
     let (chunks, tail) = logs.as_chunks::<32>();
     // SAFETY: AVX2 is enabled at compile time, and each load reads the 32 bytes of
@@ -348,7 +350,7 @@ fn find_candidates(logs: &[u8], threshold: u8, offset: usize, candidates: &mut V
             let reached = _mm256_cmpeq_epi8(_mm256_max_epu8(chunk, thresholds), chunk);
             let mut mask = _mm256_movemask_epi8(reached) as u32;
             while mask != 0 {
-                candidates.push(offset + 32 * c + mask.trailing_zeros() as usize);
+                candidates.push((offset + 32 * c + mask.trailing_zeros() as usize) as u32);
                 mask &= mask - 1;
             }
         }
@@ -362,15 +364,15 @@ fn find_candidates(logs: &[u8], threshold: u8, offset: usize, candidates: &mut V
 }
 
 #[cfg(not(target_feature = "avx2"))]
-fn find_candidates(logs: &[u8], threshold: u8, offset: usize, candidates: &mut Vec<usize>) {
+fn find_candidates(logs: &[u8], threshold: u8, offset: usize, candidates: &mut Vec<u32>) {
     find_candidates_scalar(logs, threshold, offset, candidates);
 }
 
 /// [`find_candidates`] without SIMD: for builds without AVX2, and for the tail.
-fn find_candidates_scalar(logs: &[u8], threshold: u8, offset: usize, candidates: &mut Vec<usize>) {
+fn find_candidates_scalar(logs: &[u8], threshold: u8, offset: usize, candidates: &mut Vec<u32>) {
     for (i, &log) in logs.iter().enumerate() {
         if log >= threshold {
-            candidates.push(offset + i);
+            candidates.push((offset + i) as u32);
         }
     }
 }
@@ -545,7 +547,7 @@ mod tests {
     use super::*;
 
     // the signature of find_candidates
-    type Scan = fn(&[u8], u8, usize, &mut Vec<usize>);
+    type Scan = fn(&[u8], u8, usize, &mut Vec<u32>);
 
     // Both scans find exactly the positions at or above the threshold, also for
     // thresholds of 128 and more, where a signed byte comparison would fail, and in
@@ -564,9 +566,9 @@ mod tests {
         let offset = 12345;
         let scans: [Scan; 2] = [find_candidates, find_candidates_scalar];
         for threshold in [0, 1, 50, 127, 128, 129, 200, 255] {
-            let want: Vec<usize> = (0..logs.len())
+            let want: Vec<u32> = (0..logs.len())
                 .filter(|&i| logs[i] >= threshold)
-                .map(|i| offset + i)
+                .map(|i| (offset + i) as u32)
                 .collect();
             for (s, scan) in scans.iter().enumerate() {
                 let mut got = vec![0];

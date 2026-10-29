@@ -10,7 +10,9 @@ on multiple threads.
 - **Sieving:** segmented sieve with bucket sieving for primes larger than the
   block size, per-block thresholds from the size of Q(x), and an AVX2 threshold
   scan when compiled with AVX2.
-- **Trial division:** resieving, with Barrett reduction for `x mod p`.
+- **Trial division:** the primes dividing a candidate are found from the roots,
+  for all candidates of a polynomial in one pass over the factor base (with AVX2
+  when compiled with it), and only those are divided out.
 - **Large primes:** single large prime variation, and the double large prime
   variation above 250 bits (cofactors split by Pollard rho in Montgomery
   arithmetic, partials combined by cycle finding).
