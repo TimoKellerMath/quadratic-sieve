@@ -275,11 +275,7 @@ fn run_sieve_producer(
     // the sieve thresholds of a polynomial, one per scan window, reused across
     // polynomials
     let mut thresholds = Vec::new();
-    let sieved = SievedPrimes {
-        primes: &params.factorbase,
-        logs: &params.logs,
-        first: params.first_sieved,
-    };
+    let sieved = SievedPrimes::new(&params.factorbase, &params.logs, params.first_sieved);
     let unsieved = Unsieved {
         indices: NUM_SKIP_PRIMES.min(params.first_sieved)..params.first_sieved,
         allowance: params.spv_allowance,
@@ -787,11 +783,7 @@ mod tests {
                 logs: &logs,
                 inverses: &inverses,
             };
-            let sieved = SievedPrimes {
-                primes: &factorbase,
-                logs: &logs,
-                first,
-            };
+            let sieved = SievedPrimes::new(&factorbase, &logs, first);
             sieve_over_factorbase_blocked(
                 m,
                 sieved,

@@ -56,13 +56,13 @@ fn main() {
         .ok()
         .and_then(|bound| bound.parse().ok())
         .unwrap_or(0);
-    let primes = SievedPrimes {
-        primes: &factorbase,
-        logs: &logs,
-        first: factorbase
+    let primes = SievedPrimes::new(
+        &factorbase,
+        &logs,
+        factorbase
             .partition_point(|&p| p <= spv_bound)
             .max(NUM_SKIP_PRIMES),
-    };
+    );
     let mut generators = new_polynomial_generators(
         &kn,
         sieve_interval_length as u64,

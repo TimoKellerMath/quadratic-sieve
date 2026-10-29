@@ -102,16 +102,35 @@ unsafe fn push_hit(data: *mut u16, ends: *mut usize, bucket: usize, entry: u16) 
 
 /// The factor base as [`sieve_over_factorbase_blocked`] sees it: the primes, sorted
 /// ascending, their logs, which must not decrease (as rounded logs do), and the index
-/// of the first prime it sieves, at least [`NUM_SKIP_PRIMES`]. With the small prime variation, it skips more of the
-/// smallest primes than those, whose many hits cost more than their logs are worth.
+/// of the first prime it sieves, at least [`NUM_SKIP_PRIMES`]. With the small prime
+/// variation, it skips more of the smallest primes than those, whose many hits cost
+/// more than their logs are worth.
 #[derive(Clone, Copy, Debug)]
 pub struct SievedPrimes<'a> {
-    /// The factor base.
-    pub primes: &'a [u32],
-    /// The logs of its primes.
-    pub logs: &'a [u8],
-    /// The index of the first prime sieved.
-    pub first: usize,
+    primes: &'a [u32],
+    logs: &'a [u8],
+    first: usize,
+}
+
+impl<'a> SievedPrimes<'a> {
+    /// The factor base `primes` with their `logs`, sieved from index `first` on.
+    /// Panics unless the primes are sorted ascending and those sieved at least 2,
+    /// which the buckets need to have room for every hit.
+    pub fn new(primes: &'a [u32], logs: &'a [u8], first: usize) -> SievedPrimes<'a> {
+        assert_eq!(primes.len(), logs.len(), "one log per prime");
+        assert!(primes.is_sorted(), "the primes are not sorted");
+        assert!(
+            primes
+                .get(first.max(NUM_SKIP_PRIMES))
+                .is_none_or(|&p| p >= 2),
+            "a sieved prime below 2"
+        );
+        SievedPrimes {
+            primes,
+            logs,
+            first,
+        }
+    }
 }
 
 /// How [`sieve_over_factorbase_blocked`] divides the interval: into blocks of `size`
@@ -510,11 +529,7 @@ mod tests {
             let block_size = blocking.size;
             let mut buf = vec![0u8; total_len];
             let mut next_start = 0;
-            let primes = SievedPrimes {
-                primes: &factorbase,
-                logs: &logs,
-                first,
-            };
+            let primes = SievedPrimes::new(&factorbase, &logs, first);
             sieve_over_factorbase_blocked(
                 sieve_interval_length,
                 primes,
@@ -532,6 +547,16 @@ mod tests {
             assert_eq!(next_start, total_len);
             assert_eq!(buf, want, "mismatch for {blocking:?}, first {first}");
         }
+    }
+
+    // The sieve needs sorted primes: unsorted ones could put more hits into a bucket
+    // than it has room for.
+    #[test]
+    #[should_panic(expected = "the primes are not sorted")]
+    fn unsorted_primes_are_rejected() {
+        let primes = [0, 2, 3, 5, 7, 11, 101, 13];
+        let logs = crate::factorbase::compute_logs(&primes);
+        SievedPrimes::new(&primes, &logs, NUM_SKIP_PRIMES);
     }
 
     // Blocks of 128 KiB, each with two regions of 2^16 positions, and large primes of
@@ -594,11 +619,7 @@ mod tests {
             NUM_SKIP_PRIMES,
         );
         let mut buf = vec![0u8; 2 * sieve_interval_length];
-        let primes = SievedPrimes {
-            primes: &factorbase,
-            logs: &logs,
-            first: NUM_SKIP_PRIMES,
-        };
+        let primes = SievedPrimes::new(&factorbase, &logs, NUM_SKIP_PRIMES);
         sieve_over_factorbase_blocked(
             sieve_interval_length,
             primes,

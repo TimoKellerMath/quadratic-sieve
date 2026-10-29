@@ -207,6 +207,7 @@ fn find_divisors(
     // contains the ranges
     let n = factorbase.len();
     let (r1s, r2s, inverse_slice) = (&roots.r1[..n], &roots.r2[..n], &inverses[..n]);
+    assert!(ranges.iter().all(|range| range.end <= n));
     // the positions in all lanes, as integers and as floats (exact below 2^24)
     let lanes: Vec<(__m256i, __m256)> = positions
         .iter()

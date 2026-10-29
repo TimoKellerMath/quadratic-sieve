@@ -12,6 +12,12 @@ pub const L2: usize = kib(option_env!("SIQS_L2_KIB"), 512);
 /// The size of the L3 cache shared by all cores, in bytes.
 pub const L3: usize = kib(option_env!("SIQS_L3_KIB"), 16 << 10);
 
+// the sieve needs at least one core and non-empty caches
+const _: () = assert!(
+    CORES > 0 && L1D > 0 && L2 > 0,
+    "a core count or cache size of 0"
+);
+
 /// The size of a sieve block, from [`L2`] by [`sieve_block_size`]. `SIQS_BLOCK_KIB`
 /// overrides it at run time, for parameter sweeps.
 pub const SIEVE_BLOCK_SIZE: usize = sieve_block_size(L2);
