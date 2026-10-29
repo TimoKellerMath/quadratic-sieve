@@ -92,6 +92,27 @@ fn find_divisors(
     check(none, Reduction::None, divisors);
 }
 
+/// [`pos_mod_p`] in 8 lanes: the position, in all lanes as an integer `pos` and as
+/// a float `pos_f`, modulo the primes `p` with the `inverses`.
+#[cfg(target_feature = "avx2")]
+#[inline(always)]
+fn pos_mod_p_avx2(
+    pos: std::arch::x86_64::__m256i,
+    pos_f: std::arch::x86_64::__m256,
+    p: std::arch::x86_64::__m256i,
+    inverses: std::arch::x86_64::__m256,
+) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    // SAFETY: AVX2 is enabled at compile time
+    unsafe {
+        let q = _mm256_cvttps_epi32(_mm256_mul_ps(pos_f, inverses));
+        let r = _mm256_sub_epi32(pos, _mm256_mullo_epi32(q, p));
+        // the unsigned minimum picks the candidate r, r + p or r − p in [0, p)
+        let r = _mm256_min_epu32(r, _mm256_add_epi32(r, p));
+        _mm256_min_epu32(r, _mm256_sub_epi32(r, p))
+    }
+}
+
 /// The root check of [`TrialDivision::find_divisors`] for the three ranges of
 /// primes `ranges`, 8 primes at a time, and the rest of each range scalar.
 #[cfg(target_feature = "avx2")]
@@ -104,6 +125,10 @@ fn find_divisors(
     divisors: &mut [Vec<u32>],
 ) {
     use std::arch::x86_64::*;
+    // the arrays the vectors are loaded from, all as long as the factor base, which
+    // contains the ranges
+    let n = factorbase.len();
+    let (r1s, r2s, inverse_slice) = (&roots.r1[..n], &roots.r2[..n], &inverses[..n]);
     // the positions in all lanes, as integers and as floats (exact below 2^24)
     let lanes: Vec<(__m256i, __m256)> = positions
         .iter()
@@ -118,23 +143,16 @@ fn find_divisors(
     ] {
         let mut i = indices.start;
         while i + 8 <= indices.end {
-            // SAFETY: AVX2 is enabled at compile time, and i + 8 <= indices.end <=
-            // the length of every array, since the ranges lie within the factor base
+            // SAFETY: AVX2 is enabled at compile time, and i + 8 <= indices.end <= n,
+            // the length of all four arrays
             unsafe {
                 let p = _mm256_loadu_si256(factorbase.as_ptr().add(i).cast());
-                let r1 = _mm256_loadu_si256(roots.r1.as_ptr().add(i).cast());
-                let r2 = _mm256_loadu_si256(roots.r2.as_ptr().add(i).cast());
-                let inverse = _mm256_loadu_ps(inverses.as_ptr().add(i));
+                let r1 = _mm256_loadu_si256(r1s.as_ptr().add(i).cast());
+                let r2 = _mm256_loadu_si256(r2s.as_ptr().add(i).cast());
+                let inverses = _mm256_loadu_ps(inverse_slice.as_ptr().add(i));
                 for (&(pos, pos_f), divisors) in lanes.iter().zip(divisors.iter_mut()) {
                     let r = match reduction {
-                        // as in pos_mod_p; the unsigned minimum picks the
-                        // candidate r, r + p or r − p that lies in [0, p)
-                        Reduction::Full => {
-                            let q = _mm256_cvttps_epi32(_mm256_mul_ps(pos_f, inverse));
-                            let r = _mm256_sub_epi32(pos, _mm256_mullo_epi32(q, p));
-                            let r = _mm256_min_epu32(r, _mm256_add_epi32(r, p));
-                            _mm256_min_epu32(r, _mm256_sub_epi32(r, p))
-                        }
+                        Reduction::Full => pos_mod_p_avx2(pos, pos_f, p, inverses),
                         Reduction::Subtract => _mm256_min_epu32(pos, _mm256_sub_epi32(pos, p)),
                         Reduction::None => pos,
                     };
@@ -170,6 +188,8 @@ pub struct TrialDivision<'a> {
     // the sieved primes by how a position pos < 2M is reduced modulo them: p <= M,
     // M < p < 2M and p > 2M
     ranges: [Range<usize>; 3],
+    // the length 2M of the sieve interval
+    interval: usize,
     k: u32,
     large_prime_multiplier: u32,
     use_dlp: bool,
@@ -195,6 +215,12 @@ impl<'a> TrialDivision<'a> {
         large_prime_multiplier: u32,
         use_dlp: bool,
     ) -> TrialDivision<'a> {
+        // the AVX2 root check loads them unchecked
+        assert_eq!(
+            inverses.len(),
+            factorbase.len(),
+            "one inverse per factor-base prime"
+        );
         let m = sieve_interval_length as u64;
         let first = NUM_SKIP_PRIMES.min(factorbase.len());
         // the primes are sorted ascending (the 0 for −1 comes first)
@@ -206,6 +232,7 @@ impl<'a> TrialDivision<'a> {
             factorbase,
             inverses,
             ranges: [first..medium, medium..large, large..factorbase.len()],
+            interval: 2 * sieve_interval_length,
             k,
             large_prime_multiplier,
             use_dlp,
@@ -222,6 +249,10 @@ impl<'a> TrialDivision<'a> {
     /// pass over the factor base, so the roots are read once per polynomial instead
     /// of once per candidate.
     pub fn find_divisors(&mut self, positions: &[u32], roots: &Roots) {
+        assert!(
+            roots.r1.len() == self.factorbase.len() && roots.r2.len() == self.factorbase.len(),
+            "roots for each factor-base prime"
+        );
         if self.divisors.len() < positions.len() {
             self.divisors.resize_with(positions.len(), Vec::new);
         }
@@ -232,9 +263,11 @@ impl<'a> TrialDivision<'a> {
         if positions.is_empty() {
             return;
         }
-        debug_assert!(positions.iter().all(|&pos| pos < 1 << 24));
+        debug_assert!(positions.iter().all(|&pos| (pos as usize) < self.interval));
         // only −1 and 2 have no roots, so a NONE never needs to be matched
-        debug_assert!(self.ranges[0].clone().all(|i| roots.get(i).is_some()));
+        debug_assert!(
+            (self.ranges[0].start..self.factorbase.len()).all(|i| roots.get(i).is_some())
+        );
         find_divisors(
             positions,
             self.factorbase,
@@ -369,19 +402,80 @@ impl<'a> TrialDivision<'a> {
 mod tests {
     use super::*;
 
-    // pos_mod_p is exact for every position below 2^24, for small primes, primes
-    // around the bounds M and 2M of realistic intervals, and the largest prime
-    // below 2^24.
+    // primes for the reductions: small ones, ones around the bounds M and 2M of
+    // realistic intervals, and the largest one below 2^24
+    const PRIMES: [u32; 8] = [5, 7, 13, 101, 65537, 589_811, 1_179_641, 16_777_213];
+
+    // The inverse 1/p rounded to f32, and its neighbors, which are still close
+    // enough for p >= 5 but push the quotient off in both directions.
+    fn inverses(p: u32) -> [f32; 3] {
+        let inverse = 1.0 / p as f32;
+        [
+            inverse,
+            f32::from_bits(inverse.to_bits() - 1),
+            f32::from_bits(inverse.to_bits() + 1),
+        ]
+    }
+
+    // pos_mod_p is exact for every position below 2^24, correcting the quotient in
+    // both directions.
     #[test]
     fn pos_mod_p_matches_remainder() {
-        for p in [3u32, 13, 101, 65537, 589_811, 1_179_641, 16_777_213] {
-            let inverse = 1.0 / p as f32;
-            for pos in 0..1u32 << 24 {
-                if pos_mod_p(pos, p, inverse) != pos % p {
-                    panic!("pos_mod_p({pos}, {p}) = {}", pos_mod_p(pos, p, inverse));
+        let (mut too_large, mut too_small) = (0, 0);
+        for p in PRIMES {
+            for inverse in inverses(p) {
+                for pos in 0..1u32 << 24 {
+                    if pos_mod_p(pos, p, inverse) != pos % p {
+                        panic!("pos_mod_p({pos}, {p}, {inverse})");
+                    }
+                    let q = (pos as f32 * inverse) as u32;
+                    too_large += (q > pos / p) as usize;
+                    too_small += (q < pos / p) as usize;
                 }
             }
         }
+        assert!(too_large > 0 && too_small > 0, "{too_large} {too_small}");
+        // the smallest prime it is used for, with the rounded inverse
+        let inverse = 1.0 / 3.0;
+        assert!((0..1u32 << 24).all(|pos| pos_mod_p(pos, 3, inverse) == pos % 3));
+    }
+
+    // The AVX2 reduction is exact for every position below 2^24, in every lane.
+    #[cfg(target_feature = "avx2")]
+    #[test]
+    fn avx2_pos_mod_p_matches_remainder() {
+        use std::arch::x86_64::*;
+        for k in 0..3 {
+            let inverses = PRIMES.map(|p| inverses(p)[k]);
+            // SAFETY: AVX2 is enabled at compile time, and the arrays have 8 elements
+            unsafe {
+                let p = _mm256_loadu_si256(PRIMES.as_ptr().cast());
+                let inverse = _mm256_loadu_ps(inverses.as_ptr());
+                for pos in 0..1u32 << 24 {
+                    let r = pos_mod_p_avx2(
+                        _mm256_set1_epi32(pos as i32),
+                        _mm256_set1_ps(pos as f32),
+                        p,
+                        inverse,
+                    );
+                    let mut lanes = [0u32; 8];
+                    _mm256_storeu_si256(lanes.as_mut_ptr().cast(), r);
+                    if lanes != PRIMES.map(|p| pos % p) {
+                        panic!("position {pos}, inverses {k}: {lanes:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    // The root check needs the roots of every factor-base prime.
+    #[test]
+    #[should_panic(expected = "roots for each factor-base prime")]
+    fn root_check_rejects_missing_roots() {
+        let factorbase = crate::factorbase::make_factorbase(&example_n(), 30);
+        let inverses = crate::factorbase::compute_inverses(&factorbase);
+        let mut trial_division = TrialDivision::new(&factorbase, &inverses, 1000, 1, 40, false);
+        trial_division.find_divisors(&[1], &Roots::default());
     }
 
     // an n of about 100 bits, whose polynomials yield every kind of relation
@@ -392,8 +486,8 @@ mod tests {
     }
 
     // The root checks, scalar and the one compiled in, find exactly the primes that
-    // divide Q at each position, for all three ranges of primes, also with more
-    // candidates than a vector has lanes.
+    // divide Q at each position, for all three ranges of primes, each with a rest
+    // after its vectors, and for batches of positions.
     #[test]
     fn divisors_are_the_primes_dividing_q() {
         let n: Integer = "6427752177035961102167848371107669985402627402189138248671463"
@@ -414,7 +508,12 @@ mod tests {
         );
         let mut trial_division = TrialDivision::new(&factorbase, &inverses, m, 1, 40, true);
         let ranges = trial_division.ranges.clone();
-        assert!(ranges.iter().all(|range| range.len() > 8), "{ranges:?}");
+        assert!(
+            ranges
+                .iter()
+                .all(|range| range.len() > 8 && range.len() % 8 != 0),
+            "{ranges:?}"
+        );
         let mut y = Integer::new();
         for _ in 0..3 {
             let (polynomial, roots) = generators[0].next_polynomial();

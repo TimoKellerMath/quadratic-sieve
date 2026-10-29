@@ -134,7 +134,7 @@ builds much faster.
 | `src/number_theory.rs` | Modular square roots, Miller–Rabin, Pollard rho |
 | `src/multiplier.rs` | Multiplier selection and parameter table |
 | `src/machine.rs` | The cache sizes the sieve is tuned for |
-| `src/factorbase.rs` | Factor base, square roots of `kn`, logs, reciprocals |
+| `src/factorbase.rs` | Factor base, square roots of `kn`, logs, inverses |
 
 ## License
 

@@ -23,7 +23,7 @@
 //!
 //! 1. [`multiplier`] chooses the multiplier k and the sizes of the factor base and the
 //!    sieve interval; [`factorbase`] computes the factor base and, for each of its
-//!    primes, a square root of kn, the log and a reciprocal.
+//!    primes, a square root of kn, the log and the inverse 1/p.
 //! 2. [`siqs_generator`] generates the sieving polynomials Q(x) = a x² + 2 b x + c with
 //!    b² − a c = kn, where a = q² is a square, and their roots modulo the factor base
 //!    ([`polynomial_generator`]). The 2^(s−1) polynomials sharing one a, where s is
@@ -48,7 +48,7 @@
 pub mod block_sieve;
 /// Constants shared by the sieve and trial division.
 pub mod constants;
-/// The factor base, and the square roots of kn, logs and reciprocals modulo its
+/// The factor base, and the square roots of kn, logs and inverses 1/p of its
 /// primes.
 pub mod factorbase;
 /// Combining partial relations, with one or two large primes, into full relations.
