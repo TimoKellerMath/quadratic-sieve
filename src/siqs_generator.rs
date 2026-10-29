@@ -48,6 +48,8 @@ pub struct SIQSPolynomialData<'a> {
     // the roots of the current polynomial modulo the factor-base primes, as offsets
     // into the sieve interval
     roots: Roots,
+    // the indices of the primes dividing a, where Q has a linear root
+    linear_roots: Vec<usize>,
     // the half-length M of the sieve interval [−M, M)
     m: u64,
 
@@ -107,6 +109,7 @@ impl<'a> SIQSPolynomialData<'a> {
             b: Integer::from(0),
             c: Integer::from(0),
             roots: Roots::default(),
+            linear_roots: Vec::new(),
             m: sieve_interval_length,
             n,
             factorbase,
@@ -335,6 +338,10 @@ impl<'a> SIQSPolynomialData<'a> {
                 self.q_inv_mod_ps.push(None);
             }
         }
+        self.linear_roots.clear();
+        self.linear_roots.extend(
+            (0..factorbase.len()).filter(|&i| factorbase[i] > 2 && self.q_inv_mod_ps[i].is_none()),
+        );
 
         // 2 B_i a⁻¹ mod p
         self.bainv2ips.clear();
@@ -435,43 +442,31 @@ impl<'a> SIQSPolynomialData<'a> {
         let c = (b.square_ref().complete() - self.n).div_exact(&self.a);
         debug_assert_eq!(b.clone().square() - self.a.clone() * c.clone(), *self.n);
 
-        // update the roots for the new b; the offsets change like the roots
-        assert!(
-            self.roots.len() == self.q_inv_mod_ps.len()
-                && self.factorbase.len() == self.roots.len()
-                && self.roots.len() == self.bainv2ips[nu].len()
-        );
+        // Update the roots for the new b, all but those of −1 and 2, which have none:
+        // add or subtract 2 B_ν a⁻¹; the offsets change like the roots. The primes
+        // dividing a have a dummy 0 there, so they keep their roots, which are
+        // replaced by the linear ones below.
+        let len = self.factorbase.len();
+        assert!(self.roots.len() == len && self.bainv2ips[nu].len() == len);
+        let (r1, r2) = (&mut self.roots.r1[2..], &mut self.roots.r2[2..]);
+        let (primes, deltas) = (&self.factorbase[2..], &self.bainv2ips[nu][2..]);
+        update_roots(r1, r2, deltas, primes, rounded_exponent % 2 != 0);
         let m = self.m;
-        for ((((r1, r2), &p), q_inv), &bainv) in self
-            .roots
-            .r1
-            .iter_mut()
-            .zip(&mut self.roots.r2)
-            .zip(self.factorbase)
-            .zip(&self.q_inv_mod_ps)
-            .zip(&self.bainv2ips[nu])
-        {
-            if q_inv.is_none() {
-                // p | a (or p <= 2): Q is linear mod p, with a single root
-                (*r1, *r2) = match Self::linear_root_mod_p(&b, &c, p) {
-                    Some(root) => {
-                        let offset = Self::offset(m, root, p);
-                        (offset, offset)
-                    }
-                    None => (Roots::NONE, Roots::NONE),
-                };
-            } else if *r1 != Roots::NONE {
-                let new_roots =
-                    Self::new_roots_with_sign((*r1, *r2), bainv, p, rounded_exponent % 2 != 0);
-                (*r1, *r2) = new_roots;
-                // check that they are roots of Q
-                debug_assert!([new_roots.0, new_roots.1].iter().all(|&offset| {
-                    let root = Self::root_of_offset(m, offset, p);
-                    (self.a.clone() * root * root + 2u32 * b.clone() * root + c.clone())
-                        .is_divisible_u(p)
-                }));
-            }
+        for &i in &self.linear_roots {
+            let p = self.factorbase[i];
+            let root = Self::linear_root_mod_p(&b, &c, p).expect("p > 2");
+            let offset = Self::offset(m, root, p);
+            (self.roots.r1[i], self.roots.r2[i]) = (offset, offset);
         }
+        // check that they are roots of Q
+        debug_assert!((2..len).all(|i| {
+            let p = self.factorbase[i];
+            [self.roots.r1[i], self.roots.r2[i]].iter().all(|&offset| {
+                let root = Self::root_of_offset(m, offset, p);
+                (self.a.clone() * root * root + 2u32 * b.clone() * root + c.clone())
+                    .is_divisible_u(p)
+            })
+        }));
         (
             Polynomial {
                 a: &self.a,
@@ -481,40 +476,6 @@ impl<'a> SIQSPolynomialData<'a> {
             },
             &self.roots,
         )
-    }
-
-    // the roots plus b if `sign` is set, else minus b, modulo p
-    #[inline]
-    fn new_roots_with_sign(roots: (u32, u32), b: u32, p: u32, sign: bool) -> (u32, u32) {
-        if sign {
-            let new_roots = (roots.0 + b, roots.1 + b);
-            (
-                if new_roots.0 >= p {
-                    new_roots.0 - p
-                } else {
-                    new_roots.0
-                },
-                if new_roots.1 >= p {
-                    new_roots.1 - p
-                } else {
-                    new_roots.1
-                },
-            )
-        } else {
-            let new_roots = (p + roots.0 - b, p + roots.1 - b);
-            (
-                if new_roots.0 >= p {
-                    new_roots.0 - p
-                } else {
-                    new_roots.0
-                },
-                if new_roots.1 >= p {
-                    new_roots.1 - p
-                } else {
-                    new_roots.1
-                },
-            )
-        }
     }
 
     // The Gray code step to the next polynomial of the family: for 2^ν ∥ 2j, b changes
@@ -538,6 +499,62 @@ impl<'a> SIQSPolynomialData<'a> {
     fn window_offset(&self) -> usize {
         self.window_offset
     }
+}
+
+/// Adds `deltas[i]` to the roots `r1[i]` and `r2[i]` modulo `primes[i]` if `add`,
+/// else subtracts it, for roots and deltas below their primes, without SIMD: for
+/// builds without AVX2, and for the rest after the vectors.
+fn update_roots_scalar(r1: &mut [u32], r2: &mut [u32], deltas: &[u32], primes: &[u32], add: bool) {
+    for (((r1, r2), &delta), &p) in r1.iter_mut().zip(r2.iter_mut()).zip(deltas).zip(primes) {
+        if add {
+            // r + delta < 2p, and of it and r + delta − p, the one below p is the
+            // smaller unsigned
+            let (s1, s2) = (*r1 + delta, *r2 + delta);
+            *r1 = s1.min(s1.wrapping_sub(p));
+            *r2 = s2.min(s2.wrapping_sub(p));
+        } else {
+            // r − delta wraps below 0, and then r − delta + p is the smaller unsigned
+            let (d1, d2) = (r1.wrapping_sub(delta), r2.wrapping_sub(delta));
+            *r1 = d1.min(d1.wrapping_add(p));
+            *r2 = d2.min(d2.wrapping_add(p));
+        }
+    }
+}
+
+/// [`update_roots_scalar`] without SIMD.
+#[cfg(not(target_feature = "avx2"))]
+fn update_roots(r1: &mut [u32], r2: &mut [u32], deltas: &[u32], primes: &[u32], add: bool) {
+    update_roots_scalar(r1, r2, deltas, primes, add);
+}
+
+/// [`update_roots_scalar`] for 8 primes at a time.
+#[cfg(target_feature = "avx2")]
+fn update_roots(r1: &mut [u32], r2: &mut [u32], deltas: &[u32], primes: &[u32], add: bool) {
+    use std::arch::x86_64::*;
+    let n = r1.len();
+    assert!(r2.len() == n && deltas.len() == n && primes.len() == n);
+    let mut i = 0;
+    while i + 8 <= n {
+        // SAFETY: AVX2 is enabled at compile time, and i + 8 <= n, the length of all
+        // four slices
+        unsafe {
+            let delta = _mm256_loadu_si256(deltas.as_ptr().add(i).cast());
+            let p = _mm256_loadu_si256(primes.as_ptr().add(i).cast());
+            for roots in [r1.as_mut_ptr().add(i), r2.as_mut_ptr().add(i)] {
+                let r = _mm256_loadu_si256(roots.cast());
+                let r = if add {
+                    let s = _mm256_add_epi32(r, delta);
+                    _mm256_min_epu32(s, _mm256_sub_epi32(s, p))
+                } else {
+                    let d = _mm256_sub_epi32(r, delta);
+                    _mm256_min_epu32(d, _mm256_add_epi32(d, p))
+                };
+                _mm256_storeu_si256(roots.cast(), r);
+            }
+        }
+        i += 8;
+    }
+    update_roots_scalar(&mut r1[i..], &mut r2[i..], &deltas[i..], &primes[i..], add);
 }
 
 /// One polynomial generator per sieving thread, for n with the given `factorbase`,
@@ -755,6 +772,49 @@ mod tests {
                 SIQSPolynomialData::linear_root_mod_p(&Integer::from(5), &Integer::from(3), p),
                 None
             );
+        }
+    }
+
+    // The root update, scalar and the one compiled in, adds and subtracts modulo
+    // each prime, for roots and deltas anywhere below their primes.
+    #[test]
+    fn root_update_is_modular() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut random = |bound: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as u32
+        };
+        // primes up to the largest factor-base primes, and a length that leaves a
+        // rest after the vectors
+        let primes: Vec<u32> = (0..1003)
+            .map(|i| [3, 5, 13, 65537, 1_179_641, 16_777_213][i % 6])
+            .collect();
+        let deltas: Vec<u32> = primes.iter().map(|&p| random(p)).collect();
+        let r1: Vec<u32> = primes.iter().map(|&p| random(p)).collect();
+        let mut r2: Vec<u32> = primes.iter().map(|&p| random(p)).collect();
+        // the extremes 0 and p - 1
+        r2[..6].copy_from_slice(&[0, 4, 0, 65536, 0, 16_777_212]);
+        for add in [false, true] {
+            let (mut v1, mut v2) = (r1.clone(), r2.clone());
+            let (mut s1, mut s2) = (r1.clone(), r2.clone());
+            update_roots(&mut v1, &mut v2, &deltas, &primes, add);
+            update_roots_scalar(&mut s1, &mut s2, &deltas, &primes, add);
+            for i in 0..primes.len() {
+                let (p, d) = (primes[i] as u64, deltas[i] as u64);
+                let want = |r: u32| (if add { r as u64 + d } else { r as u64 + p - d } % p) as u32;
+                assert_eq!(
+                    (v1[i], v2[i]),
+                    (want(r1[i]), want(r2[i])),
+                    "add {add}, prime {p}"
+                );
+                assert_eq!(
+                    (s1[i], s2[i]),
+                    (v1[i], v2[i]),
+                    "add {add}, prime {p}, scalar"
+                );
+            }
         }
     }
 
