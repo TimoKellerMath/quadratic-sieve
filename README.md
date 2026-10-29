@@ -80,11 +80,11 @@ documentation, with an overview of the algorithm.
 
 | Variable | Effect |
 |---|---|
-| `SIQS_LP_SLACK` | Sieve threshold slack, in units of the large-prime bound's log. Defaults: 0.75, or 0.72 to 1.15 with the double large prime variation, depending on the size of `n`. |
+| `SIQS_LP_SLACK` | Sieve threshold slack, in units of the large-prime bound's log. Defaults: 0.75, or 1.3 to 1.7 with the double large prime variation, depending on the size of `n`. |
 | `SIQS_GLOBAL_THRESHOLD` | Use one threshold for the whole sieve interval instead of one per block. |
 | `SIQS_FB_SIZE`, `SIQS_M`, `SIQS_LP_MULT` | Override the factor base size, the half-length M of the sieve interval [−M, M) and the large-prime multiplier of the parameter table, for parameter sweeps. |
 | `SIQS_DLP` | `1` or `0` turns the double large prime variation on or off; by default it is on above 250 bits. |
-| `SIQS_DLP_EXP` | A cofactor with two large primes may be up to the large-prime bound to this power, at most 2 (the default). |
+| `SIQS_DLP_EXP` | A cofactor with two large primes may be up to the large-prime bound to this power, at most 2; 1.85 by default. |
 | `SIQS_SPV_BOUND`, `SIQS_SPV_ALLOWANCE` | The small prime variation: the sieve skips the primes up to the bound (256 for factor bases of 1000 primes or more, else 0), and the scan lowers its thresholds by the allowance in bits (30) and adds the logs of the skipped primes that divide Q at the positions found. |
 | `SIQS_BLOCK_KIB` | Sieve block size in KiB, a power of two; by default the largest one up to a quarter of the L2. |
 | `SIQS_PROFILE` | Print per-phase timings of the first sieving thread to stderr every 2000 polynomials. |

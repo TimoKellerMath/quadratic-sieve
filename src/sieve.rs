@@ -35,9 +35,12 @@ type RelationMsg = (Relation, usize);
 ///
 /// The default is 0.75 without the double large prime variation, measured as the
 /// optimum at 202 bits. With it, the optimum grows with n, since larger cofactors make
-/// partials more valuable: 0.72 measured at 251 bits, and 1.15, not yet tuned, at 300
-/// bits, interpolated linearly in between and clamped outside. `SIQS_LP_SLACK`
-/// overrides it, e.g. `SIQS_LP_SLACK=1.5`, for parameter sweeps.
+/// partials more valuable, and since trial division of a candidate became cheap, it
+/// is high: about 1.3 for n of 252 bits (1.2 to 1.5 within noise), 1.7 at 282 and
+/// 1.65 at 302 bits (the examples called 251, 281 and 301 bits, measured with the
+/// DLP exponent 1.85 and the small prime variation), interpolated linearly in
+/// between and clamped outside. `SIQS_LP_SLACK` overrides
+/// it, e.g. `SIQS_LP_SLACK=1.5`, for parameter sweeps.
 fn lp_slack_multiplier(use_dlp: bool, n_bits: u32) -> f64 {
     static OVERRIDE: OnceLock<Option<f64>> = OnceLock::new();
     OVERRIDE
@@ -54,10 +57,26 @@ fn default_lp_slack_multiplier(use_dlp: bool, n_bits: u32) -> f64 {
     if !use_dlp {
         return 0.75;
     }
-    // linear in n's bit size between the measured anchors (251, 0.72) and (300, 1.15)
-    let t = ((n_bits as f64 - 251.0) / (300.0 - 251.0)).clamp(0.0, 1.0);
-    0.72 + t * (1.15 - 0.72)
+    // the measured optima by the bits of n, linear in between and clamped outside
+    const OPTIMA: [(f64, f64); 3] = [(252.0, 1.3), (282.0, 1.7), (302.0, 1.65)];
+    let bits = n_bits as f64;
+    let (first, last) = (OPTIMA[0], OPTIMA[OPTIMA.len() - 1]);
+    if bits <= first.0 {
+        return first.1;
+    }
+    OPTIMA
+        .windows(2)
+        .find(|pair| bits <= pair[1].0)
+        .map_or(last.1, |pair| {
+            let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+            y0 + (bits - x0) / (x1 - x0) * (y1 - y0)
+        })
 }
+
+/// The default exponent of the bound of a cofactor with two large primes, see
+/// [`dlp_bound`]: at 301 bits, 1.85 was as fast as 2 at slack 1.8 and allows the
+/// lower optimal slack. YAFU uses 1.9 at this size, msieve 1.8.
+const DEFAULT_DLP_EXPONENT: f64 = 1.85;
 
 /// The sieve threshold's large-prime slack in bits:
 /// `lp_slack_multiplier · log2(large_prime_multiplier · p_max)`.
@@ -171,7 +190,7 @@ impl SieveParams {
             "large-prime multiplier {large_prime_multiplier} out of range"
         );
         // the bound of a cofactor with two large primes, lp_bound^SIQS_DLP_EXP
-        let dlp_exponent = env_override("SIQS_DLP_EXP").unwrap_or(2.0);
+        let dlp_exponent = env_override("SIQS_DLP_EXP").unwrap_or(DEFAULT_DLP_EXPONENT);
         let dlp_bound =
             use_dlp.then(|| dlp_bound(largest_prime * large_prime_multiplier as u64, dlp_exponent));
         if use_dlp {
@@ -813,14 +832,20 @@ mod tests {
         for n_bits in [64, 202, 250, 301] {
             assert!(close(default_lp_slack_multiplier(false, n_bits), 0.75));
         }
-        // with it: linear between (251, 0.72) and (300, 1.15), clamped outside
-        assert!(close(default_lp_slack_multiplier(true, 251), 0.72));
-        assert!(close(default_lp_slack_multiplier(true, 300), 1.15));
+        // with it: linear between the optima (252, 1.3), (282, 1.7), (302, 1.65),
+        // clamped outside
+        assert!(close(default_lp_slack_multiplier(true, 252), 1.3));
+        assert!(close(default_lp_slack_multiplier(true, 282), 1.7));
+        assert!(close(default_lp_slack_multiplier(true, 302), 1.65));
         assert!(close(
-            default_lp_slack_multiplier(true, 270),
-            0.72 + 0.43 * 19.0 / 49.0
+            default_lp_slack_multiplier(true, 267),
+            1.3 + 0.4 * 15.0 / 30.0
         ));
-        assert!(close(default_lp_slack_multiplier(true, 200), 0.72));
-        assert!(close(default_lp_slack_multiplier(true, 400), 1.15));
+        assert!(close(
+            default_lp_slack_multiplier(true, 292),
+            1.7 - 0.05 * 10.0 / 20.0
+        ));
+        assert!(close(default_lp_slack_multiplier(true, 200), 1.3));
+        assert!(close(default_lp_slack_multiplier(true, 400), 1.65));
     }
 }
