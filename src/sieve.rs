@@ -8,8 +8,8 @@ use rug::integer::IsPrime;
 use rug::{Complete, Integer};
 
 use crate::block_sieve::{
-    SIEVE_CALLS, SIEVE_LOOP_NANOS, SIEVE_SETUP_NANOS, SieveScratch, sieve_over_factorbase_blocked,
-    skipped_logs,
+    Blocking, SIEVE_CALLS, SIEVE_LOOP_NANOS, SIEVE_SETUP_NANOS, SieveScratch,
+    sieve_over_factorbase_blocked, skipped_logs,
 };
 use crate::factorbase::*;
 use crate::large_primes::PartialStore;
@@ -98,8 +98,8 @@ struct SieveParams {
     lp_slack: u32,
     // the sum of the logs of the factor-base entries the sieve skips
     skipped_logs: u32,
-    // the size of a sieve block, a power of two
-    block_size: usize,
+    // the sieve's blocks and sub-blocks
+    blocking: Blocking,
 }
 
 impl SieveParams {
@@ -182,7 +182,7 @@ impl SieveParams {
             use_dlp,
             lp_slack,
             skipped_logs: skipped,
-            block_size,
+            blocking: Blocking::with_size(block_size),
         })
     }
 
@@ -292,7 +292,7 @@ fn run_sieve_producer(
             roots,
             &params.logs,
             &mut sieve_scratch,
-            params.block_size,
+            params.blocking,
             |block_start, sums| {
                 let prof_t = profile.then(Instant::now);
                 // the windows overlapping the block, cut at its ends

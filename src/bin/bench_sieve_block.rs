@@ -6,7 +6,7 @@
 // Usage: bench_sieve_block [bits [polynomials [block size in KiB ...]]]
 // Defaults: 301 bits, 1000 polynomials, block sizes of 16 to 512 KiB.
 use rug::Integer;
-use siqs::block_sieve::{SieveScratch, sieve_over_factorbase_blocked};
+use siqs::block_sieve::{Blocking, SieveScratch, sieve_over_factorbase_blocked};
 use siqs::factorbase::{compute_logs, make_factorbase, square_roots_mod_factorbase};
 use siqs::multiplier::{compute_multiplier, compute_sieve_parameters};
 use siqs::number_theory::SMALL_PRIMES;
@@ -86,7 +86,7 @@ fn main() {
                 roots,
                 &logs,
                 &mut scratch,
-                block_sizes[b],
+                Blocking::with_size(block_sizes[b]),
                 |block_start, sums| {
                     let start = Instant::now();
                     buffer[block_start..block_start + sums.len()].copy_from_slice(sums);

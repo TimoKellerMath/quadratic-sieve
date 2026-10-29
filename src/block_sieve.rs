@@ -1,4 +1,5 @@
 use crate::constants::NUM_SKIP_PRIMES;
+use crate::machine::L1D;
 use crate::polynomial_generator::Roots;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -87,19 +88,105 @@ unsafe fn push_hit(data: *mut u32, ends: *mut usize, block: usize, entry: u32) {
     }
 }
 
+/// How [`sieve_over_factorbase_blocked`] divides the interval: into blocks of `size`
+/// positions, and these into sub-blocks of `sub_size` positions, through which the
+/// primes up to `sub_bound` are walked one sub-block at a time, so that their many
+/// hits stay in the L1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Blocking {
+    /// The size of a block, a power of two.
+    pub size: usize,
+    /// The size of a sub-block, at least 1.
+    pub sub_size: usize,
+    /// The largest prime walked through the sub-blocks.
+    pub sub_bound: u32,
+}
+
+impl Blocking {
+    /// Blocks of `size` positions, with sub-blocks of the size of the L1d,
+    /// [`L1D`], for the primes up to an eighth of it, which hit a sub-block at
+    /// least 8 times per root. Both were the fastest at 301 bits: the sieve took
+    /// 5-7% less time than without sub-blocks, while 16 or 64 KiB, or the primes up
+    /// to 16384, gained less.
+    pub fn with_size(size: usize) -> Blocking {
+        Blocking {
+            size,
+            sub_size: L1D,
+            sub_bound: (L1D / 8) as u32,
+        }
+    }
+}
+
+/// Adds `logs[k]` at every position below `end` of the buffer `buf` that the k-th
+/// of `primes` hits, from its two carry positions `next_pos[2 k]` and
+/// `next_pos[2 k + 1]` on (`usize::MAX` for none), and leaves them at the next
+/// hits, minus `rebase`. Both roots of a prime are walked in one loop, which halves
+/// the loop steps.
+///
+/// # Safety
+///
+/// `next_pos` holds two entries per prime, the first of which is `usize::MAX` only
+/// if both are, and `buf` has room for `end` bytes.
+#[inline(always)]
+unsafe fn carry_walk(
+    primes: &[u32],
+    logs: &[u8],
+    next_pos: *mut usize,
+    buf: *mut u8,
+    end: usize,
+    rebase: usize,
+) {
+    for (k, (&p, &log)) in primes.iter().zip(logs).enumerate() {
+        let p = p as usize;
+        // SAFETY: guaranteed by the caller
+        unsafe {
+            let (j1, j2) = (*next_pos.add(2 * k), *next_pos.add(2 * k + 1));
+            if j1 == usize::MAX {
+                continue;
+            }
+            if j2 == usize::MAX {
+                // a single root
+                let mut j = j1;
+                while j < end {
+                    *buf.add(j) = (*buf.add(j)).wrapping_add(log);
+                    j += p;
+                }
+                *next_pos.add(2 * k) = j - rebase;
+                continue;
+            }
+            // both roots while the larger one is inside, then the smaller one; their
+            // order in next_pos does not matter
+            let (mut lo, mut hi) = (j1.min(j2), j1.max(j2));
+            while hi < end {
+                *buf.add(lo) = (*buf.add(lo)).wrapping_add(log);
+                *buf.add(hi) = (*buf.add(hi)).wrapping_add(log);
+                lo += p;
+                hi += p;
+            }
+            while lo < end {
+                *buf.add(lo) = (*buf.add(lo)).wrapping_add(log);
+                lo += p;
+            }
+            *next_pos.add(2 * k) = lo - rebase;
+            *next_pos.add(2 * k + 1) = hi - rebase;
+        }
+    }
+}
+
 /// Sieves one polynomial over the interval [−M, M), M = `sieve_interval_length`:
 /// position i of the interval stands for x = i − M and receives the sum of `logs[j]`
 /// over the roots of the polynomial modulo `factorbase[j]`, given as offsets r into
 /// the interval (see [`Roots`]), with i ≡ r, for every j from [`NUM_SKIP_PRIMES`] on.
 ///
-/// The interval is sieved in blocks of `block_size` positions, a power of two, so
-/// that a block stays in the cache; a `block_size` of at least 2M gives one block.
-/// Each block is cleared just before it is sieved, and passed to `on_block` with its
+/// The interval is sieved in blocks of `blocking.size` positions, a power of two, so
+/// that a block stays in the cache; a size of at least 2M gives one block. Each
+/// block is cleared just before it is sieved, and passed to `on_block` with its
 /// first position as soon as it is complete, so that the sums of only one block are
-/// held. A prime up to `block_size` hits every block, so it is walked through each
-/// block from where the previous block left off. A larger prime hits a block at most
-/// once per root, so its hits are sorted into one bucket per block first, which the
-/// block then drains: this costs a step per hit instead of one per prime and block.
+/// held. A prime up to the block size hits every block, so it is walked through each
+/// block from where the previous block left off, the smallest ones (see
+/// [`Blocking`]) through each sub-block. A larger prime hits a block at most once
+/// per root, so its hits are sorted into one bucket per block first, which the block
+/// then drains: this costs a step per hit instead of one per prime and block.
 ///
 /// `factorbase` is sorted ascending, and `roots` and `logs` belong to its primes.
 /// 2M < 2^24, and `scratch` is reused across calls.
@@ -109,9 +196,10 @@ pub fn sieve_over_factorbase_blocked(
     roots: &Roots,
     logs: &[u8],
     scratch: &mut SieveScratch,
-    block_size: usize,
+    blocking: Blocking,
     mut on_block: impl FnMut(usize, &[u8]),
 ) {
+    let block_size = blocking.size;
     let SieveScratch {
         next_pos,
         buckets,
@@ -125,6 +213,7 @@ pub fn sieve_over_factorbase_blocked(
         block_size.is_power_of_two(),
         "block size {block_size} is not a power of two"
     );
+    assert!(blocking.sub_size > 0, "empty sub-blocks");
     let block_shift = block_size.trailing_zeros();
     let num_blocks = total_len.div_ceil(block_size);
 
@@ -200,6 +289,8 @@ pub fn sieve_over_factorbase_blocked(
     // --- process each block: small primes by carry walk, then drain its bucket ---
     let small_primes = &factorbase[ns..split];
     let small_logs = &logs[ns..split];
+    // the small primes walked through the sub-blocks
+    let tiny = small_primes.partition_point(|&p| p <= blocking.sub_bound);
     let next_pos_ptr = next_pos.as_mut_ptr();
     if block.len() < block_size.min(total_len) {
         block.resize(block_size.min(total_len), 0);
@@ -213,32 +304,32 @@ pub fn sieve_over_factorbase_blocked(
         let sums = &mut block[..block_len];
         sums.fill(0);
         let buf_ptr = sums.as_mut_ptr();
-        let mut idx = 0usize;
-        for (&p, &log) in small_primes.iter().zip(small_logs) {
-            let p_us = p as usize;
-            // SAFETY: next_pos holds two entries per small prime, so idx + 1 is in
-            // bounds, and every write stays below block_len, the length of `sums`
-            unsafe {
-                let pos1 = *next_pos_ptr.add(idx);
-                if pos1 != usize::MAX {
-                    let mut j = pos1;
-                    while j < block_len {
-                        *buf_ptr.add(j) = (*buf_ptr.add(j)).wrapping_add(log);
-                        j += p_us;
-                    }
-                    *next_pos_ptr.add(idx) = j - block_len;
-                }
-                let pos2 = *next_pos_ptr.add(idx + 1);
-                if pos2 != usize::MAX {
-                    let mut j = pos2;
-                    while j < block_len {
-                        *buf_ptr.add(j) = (*buf_ptr.add(j)).wrapping_add(log);
-                        j += p_us;
-                    }
-                    *next_pos_ptr.add(idx + 1) = j - block_len;
-                }
+        // SAFETY: next_pos holds two entries per small prime, the first of which is
+        // usize::MAX only if both are, and every write stays below block_len, the
+        // length of `sums`
+        unsafe {
+            let mut sub_end = 0;
+            while sub_end < block_len {
+                sub_end = (sub_end + blocking.sub_size).min(block_len);
+                // relative to the next block after the last sub-block
+                let rebase = if sub_end == block_len { block_len } else { 0 };
+                carry_walk(
+                    &small_primes[..tiny],
+                    &small_logs[..tiny],
+                    next_pos_ptr,
+                    buf_ptr,
+                    sub_end,
+                    rebase,
+                );
             }
-            idx += 2;
+            carry_walk(
+                &small_primes[tiny..],
+                &small_logs[tiny..],
+                next_pos_ptr.add(2 * tiny),
+                buf_ptr,
+                block_len,
+                block_len,
+            );
         }
         // drain the large-prime hits that fall in this block
         for &packed in buckets.block(block_idx) {
@@ -342,7 +433,21 @@ mod tests {
         // block sizes that are tiny (many blocks), that don't divide total_len, and
         // that exceed total_len (single block): every prime above the size goes to
         // the buckets. The scratch is reused, so each size must clear its blocks.
-        for &block_size in &[8usize, 16, 64, 256, 512, 1024, 4096, 64, 8] {
+        // Sub-blocks of every size, which need not divide the block, for no, some
+        // or all small primes.
+        let blockings = [8usize, 16, 64, 256, 512, 1024, 4096, 64, 8]
+            .into_iter()
+            .flat_map(|size| {
+                [(size, 0), (3, 40), (16, 300), (100, 5000), (5000, 5000)].map(
+                    |(sub_size, sub_bound)| Blocking {
+                        size,
+                        sub_size,
+                        sub_bound,
+                    },
+                )
+            });
+        for blocking in blockings {
+            let block_size = blocking.size;
             let mut buf = vec![0u8; total_len];
             let mut next_start = 0;
             sieve_over_factorbase_blocked(
@@ -351,7 +456,7 @@ mod tests {
                 &roots,
                 &logs,
                 &mut scratch,
-                block_size,
+                blocking,
                 |block_start, sums| {
                     // the blocks come in order, each complete
                     assert_eq!(block_start, next_start);
@@ -361,7 +466,7 @@ mod tests {
                 },
             );
             assert_eq!(next_start, total_len);
-            assert_eq!(buf, want, "mismatch at block_size = {block_size}");
+            assert_eq!(buf, want, "mismatch for {blocking:?}");
         }
     }
 }
