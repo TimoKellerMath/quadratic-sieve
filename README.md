@@ -70,6 +70,10 @@ documentation, with an overview of the algorithm.
 |---|---|
 | `SIQS_LP_SLACK` | Sieve threshold slack, in units of the large-prime bound's log. Defaults: 0.75, or 0.72 to 1.15 with the double large prime variation, depending on the size of `n`. |
 | `SIQS_GLOBAL_THRESHOLD` | Use one threshold for the whole sieve interval instead of one per block. |
+| `SIQS_FB_SIZE`, `SIQS_M`, `SIQS_LP_MULT` | Override the factor base size, the half-length M of the sieve interval [−M, M) and the large-prime multiplier of the parameter table, for parameter sweeps. |
+| `SIQS_DLP` | `1` or `0` turns the double large prime variation on or off; by default it is on above 250 bits. |
+| `SIQS_BLOCK_KIB` | Sieve block size in KiB, a power of two; by default the largest one up to a quarter of the L2. |
+| `SIQS_L1D_KIB`, `SIQS_L2_KIB`, `SIQS_L3_KIB` | Cache sizes per core (L1d, L2) and shared (L3) of the machine to tune for, in KiB. The defaults are those of the machine below: 32, 512 and 16384. |
 | `SIQS_PROFILE` | Print per-phase timings of the first sieving thread to stderr every 2000 polynomials. |
 | `SIQS_DUMP_MATRIX=path` | Write the relation matrix to `path` if Block Lanczos fails. |
 | `SIQS_BL_DEBUG` | Print the rank Block Lanczos finds. |
@@ -122,6 +126,7 @@ builds much faster.
 | `src/linalg.rs` | Block Lanczos and a dense GF(2) solver |
 | `src/number_theory.rs` | Modular square roots, Miller–Rabin, Pollard rho |
 | `src/multiplier.rs` | Multiplier selection and parameter table |
+| `src/machine.rs` | The cache sizes the sieve is tuned for |
 | `src/factorbase.rs` | Factor base, square roots of `kn`, logs, reciprocals |
 
 ## License

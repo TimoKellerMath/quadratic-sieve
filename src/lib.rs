@@ -56,6 +56,9 @@ pub mod large_primes;
 /// Dependencies among the relations: Block Lanczos over GF(2), with a dense
 /// elimination as reference and fallback.
 pub mod linalg;
+/// The caches the sieve is tuned for, with the sizes of another machine from the
+/// environment.
+pub mod machine;
 /// The multiplier and the sieve parameters, both after msieve.
 pub mod multiplier;
 /// Modular square roots and inverses, and primality tests and Pollard rho for 64-bit

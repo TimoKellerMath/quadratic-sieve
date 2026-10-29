@@ -13,6 +13,7 @@ use crate::block_sieve::{
 use crate::factorbase::*;
 use crate::large_primes::PartialStore;
 use crate::linalg::*;
+use crate::machine::Caches;
 use crate::multiplier::*;
 use crate::number_theory::*;
 use crate::relation::Relation;
@@ -61,6 +62,14 @@ fn lp_slack_bits(use_dlp: bool, n_bits: u32, largest_log: u32, large_prime_multi
     (lp_slack_multiplier(use_dlp, n_bits) * lp_bound_log) as u32
 }
 
+/// The value of the environment variable `name`, if it is set and parses: the
+/// overrides of the sieve parameters, for parameter sweeps.
+fn env_override<T: std::str::FromStr>(name: &str) -> Option<T> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+}
+
 /// Whether `SIQS_GLOBAL_THRESHOLD` is set, which replaces the per-block thresholds by
 /// one for the whole interval, from log2(kn/a), to compare the two.
 fn use_global_threshold() -> bool {
@@ -86,6 +95,8 @@ struct SieveParams {
     use_dlp: bool,
     // large-prime slack in bits: how much non-smooth cofactor a candidate may keep
     lp_slack: u32,
+    // the size of a sieve block, a power of two
+    block_size: usize,
 }
 
 impl SieveParams {
@@ -93,11 +104,29 @@ impl SieveParams {
         let k = compute_multiplier(n)?;
         info!("k = {k}");
         let kn: Integer = n.clone() * k;
-        // the parameters for the size of kn
+        // the parameters for the size of kn, or from the environment
         let log2_kn = (kn.significant_bits() + 1) as usize;
         let (factorbase_size, sieve_interval_length, large_prime_multiplier) =
             compute_sieve_parameters(log2_kn);
-        info!("factor base size: {factorbase_size}");
+        let factorbase_size = env_override("SIQS_FB_SIZE").unwrap_or(factorbase_size);
+        let sieve_interval_length = env_override("SIQS_M").unwrap_or(sieve_interval_length);
+        let large_prime_multiplier = env_override("SIQS_LP_MULT").unwrap_or(large_prime_multiplier);
+        let block_size = env_override::<usize>("SIQS_BLOCK_KIB")
+            .map_or_else(|| Caches::from_env().sieve_block_size(), |kib| kib << 10);
+        // the bucket entries pack a position of the interval into 24 bits
+        assert!(
+            (1..1 << 23).contains(&sieve_interval_length),
+            "sieve interval half-length {sieve_interval_length} not in [1, 2^23)"
+        );
+        assert!(
+            block_size.is_power_of_two(),
+            "block size {block_size} is not a power of two"
+        );
+        info!(
+            "factor base size: {factorbase_size}, sieve interval: 2 * {sieve_interval_length}, \
+             large-prime multiplier: {large_prime_multiplier}, block size: {} KiB",
+            block_size >> 10
+        );
         let factorbase_without_k = make_factorbase(&kn, factorbase_size);
         // add prime factors of multiplier k to factor base
         let prime_divisors_of_multiplier = SMALL_PRIMES
@@ -116,8 +145,16 @@ impl SieveParams {
         // cofactors are big enough that admitting two large primes pays for the extra
         // primality test / Pollard-rho split and the larger partial-relation graph.
         let n_bits = n.significant_bits();
-        let use_dlp = n_bits > 250;
+        let use_dlp = env_override::<u8>("SIQS_DLP").map_or(n_bits > 250, |dlp| dlp != 0);
         info!("double large prime: {use_dlp}");
+        // trial division keeps a large prime in a u32, and decides that a cofactor
+        // below the bound is prime because it is below the largest prime squared
+        let largest_prime = *factorbase.last().unwrap() as u64;
+        assert!(
+            (1..largest_prime).contains(&(large_prime_multiplier as u64))
+                && largest_prime * large_prime_multiplier as u64 <= u32::MAX as u64,
+            "large-prime multiplier {large_prime_multiplier} out of range"
+        );
         let lp_slack = lp_slack_bits(
             use_dlp,
             n_bits,
@@ -140,6 +177,7 @@ impl SieveParams {
             large_prime_multiplier,
             use_dlp,
             lp_slack,
+            block_size,
         })
     }
 
@@ -200,7 +238,6 @@ fn run_sieve_producer(
         let prof_t0 = Instant::now();
         let (polynomial, roots) = polynomial_generator.next_polynomial();
         trace!("thread {index_thread}: next polynomial");
-        const BLOCK_SIZE: usize = 2 * 65536;
         let prof_t1 = Instant::now();
         let sum_small_logs = sieve_over_factorbase_blocked(
             sieve_interval_length,
@@ -209,7 +246,7 @@ fn run_sieve_producer(
             &params.logs,
             &mut logs_for_polynomial,
             &mut sieve_scratch,
-            BLOCK_SIZE,
+            params.block_size,
         );
         // Per-block thresholds: log2|Q(x)| is not flat over the interval. It is
         // ≈ log2(kn/a) over most of it but dips near the two roots of Q at
