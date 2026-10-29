@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// counters, it is only accumulated if `SIQS_PROFILE` is set, for the profile report
 /// of the sieving threads.
 pub(crate) static SIEVE_SETUP_NANOS: AtomicU64 = AtomicU64::new(0);
-/// Nanoseconds that [`sieve_over_factorbase_blocked`] spent in its block loop.
+/// Nanoseconds that [`sieve_over_factorbase_blocked`] spent in its block loop,
+/// without the calls of its `on_block`.
 pub(crate) static SIEVE_LOOP_NANOS: AtomicU64 = AtomicU64::new(0);
 /// The number of calls of [`sieve_over_factorbase_blocked`].
 pub(crate) static SIEVE_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -20,12 +21,23 @@ fn sieve_profile_enabled() -> bool {
 }
 
 /// The scratch of [`sieve_over_factorbase_blocked`]: the carry positions of the small
-/// primes and the buckets of the large primes. Owned by the caller so that the
-/// allocations are reused across polynomials.
+/// primes, the buckets of the large primes and the sums of the current block. Owned
+/// by the caller so that the allocations are reused across polynomials.
 #[derive(Default)]
 pub struct SieveScratch {
     next_pos: Vec<usize>,
     buckets: Buckets,
+    block: Vec<u8>,
+}
+
+/// The sum of the logs of the factor-base entries that
+/// [`sieve_over_factorbase_blocked`] skips (see [`NUM_SKIP_PRIMES`]), which the
+/// sieve threshold has to account for.
+pub fn skipped_logs(logs: &[u8]) -> u32 {
+    logs[..NUM_SKIP_PRIMES.min(logs.len())]
+        .iter()
+        .map(|&log| log as u32)
+        .sum()
 }
 
 /// Per-block buckets of large-prime hits for [`sieve_over_factorbase_blocked`], in one
@@ -76,36 +88,38 @@ unsafe fn push_hit(data: *mut u32, ends: *mut usize, block: usize, entry: u32) {
 }
 
 /// Sieves one polynomial over the interval [−M, M), M = `sieve_interval_length`:
-/// position i of `logs_for_polynomial` stands for x = i − M and receives the sum of
-/// `logs[j]` over the roots of the polynomial modulo `factorbase[j]`, given as
-/// offsets r into the interval (see [`Roots`]), with i ≡ r, for every j from
-/// [`NUM_SKIP_PRIMES`] on. Returns the sum of the logs of the skipped primes, which
-/// the threshold has to account for.
+/// position i of the interval stands for x = i − M and receives the sum of `logs[j]`
+/// over the roots of the polynomial modulo `factorbase[j]`, given as offsets r into
+/// the interval (see [`Roots`]), with i ≡ r, for every j from [`NUM_SKIP_PRIMES`] on.
 ///
 /// The interval is sieved in blocks of `block_size` positions, a power of two, so
 /// that a block stays in the cache; a `block_size` of at least 2M gives one block.
-/// A prime up to `block_size` hits every block, so it is walked through each block
-/// from where the previous block left off. A larger prime hits a block at most once
-/// per root, so its hits are sorted into one bucket per block first, which the block
-/// then drains: this costs a step per hit instead of one per prime and block.
+/// Each block is cleared just before it is sieved, and passed to `on_block` with its
+/// first position as soon as it is complete, so that the sums of only one block are
+/// held. A prime up to `block_size` hits every block, so it is walked through each
+/// block from where the previous block left off. A larger prime hits a block at most
+/// once per root, so its hits are sorted into one bucket per block first, which the
+/// block then drains: this costs a step per hit instead of one per prime and block.
 ///
 /// `factorbase` is sorted ascending, and `roots` and `logs` belong to its primes.
-/// `logs_for_polynomial` has length 2M < 2^24, and `scratch` is reused across calls.
+/// 2M < 2^24, and `scratch` is reused across calls.
 pub fn sieve_over_factorbase_blocked(
     sieve_interval_length: usize,
     factorbase: &[u32],
     roots: &Roots,
     logs: &[u8],
-    logs_for_polynomial: &mut [u8],
     scratch: &mut SieveScratch,
     block_size: usize,
-) -> u32 {
-    let SieveScratch { next_pos, buckets } = scratch;
+    mut on_block: impl FnMut(usize, &[u8]),
+) {
+    let SieveScratch {
+        next_pos,
+        buckets,
+        block,
+    } = scratch;
     debug_assert_eq!(factorbase.len(), roots.len());
     debug_assert_eq!(factorbase.len(), logs.len());
     let total_len = 2usize * sieve_interval_length;
-    debug_assert_eq!(logs_for_polynomial.len(), total_len);
-    logs_for_polynomial.fill(0);
 
     assert!(
         block_size.is_power_of_two(),
@@ -162,8 +176,9 @@ pub fn sieve_over_factorbase_blocked(
     }
 
     // --- carry positions for the small primes (p <= block_size) ---
-    // two per prime; usize::MAX marks a missing root (no roots, or the second copy
-    // of a double root)
+    // two per prime, relative to the start of the block to be sieved next (a root is
+    // below p, so in the first block); usize::MAX marks a missing root (no roots, or
+    // the second copy of a double root)
     next_pos.clear();
     for (&root1, &root2) in roots.r1[ns..split].iter().zip(&roots.r2[ns..split]) {
         if root1 != Roots::NONE {
@@ -180,63 +195,72 @@ pub fn sieve_over_factorbase_blocked(
     }
 
     let prof_t1 = profile.then(std::time::Instant::now);
+    let mut prof_on_block = std::time::Duration::ZERO;
 
     // --- process each block: small primes by carry walk, then drain its bucket ---
     let small_primes = &factorbase[ns..split];
     let small_logs = &logs[ns..split];
-    let buf_ptr = logs_for_polynomial.as_mut_ptr();
     let next_pos_ptr = next_pos.as_mut_ptr();
-    let mut block_start = 0usize;
-    let mut block_idx = 0usize;
-    while block_start < total_len {
-        let block_end = (block_start + block_size).min(total_len);
+    if block.len() < block_size.min(total_len) {
+        block.resize(block_size.min(total_len), 0);
+    }
+    // a bucket entry's position within its block (blocks start at multiples of
+    // block_size)
+    let offset_mask = (block_size - 1) & 0x00FF_FFFF;
+    for block_idx in 0..num_blocks {
+        let block_start = block_idx << block_shift;
+        let block_len = block_size.min(total_len - block_start);
+        let sums = &mut block[..block_len];
+        sums.fill(0);
+        let buf_ptr = sums.as_mut_ptr();
         let mut idx = 0usize;
         for (&p, &log) in small_primes.iter().zip(small_logs) {
             let p_us = p as usize;
             // SAFETY: next_pos holds two entries per small prime, so idx + 1 is in
-            // bounds, and every write stays below block_end <= total_len, the
-            // length of the buffer
+            // bounds, and every write stays below block_len, the length of `sums`
             unsafe {
                 let pos1 = *next_pos_ptr.add(idx);
                 if pos1 != usize::MAX {
                     let mut j = pos1;
-                    while j < block_end {
+                    while j < block_len {
                         *buf_ptr.add(j) = (*buf_ptr.add(j)).wrapping_add(log);
                         j += p_us;
                     }
-                    *next_pos_ptr.add(idx) = j;
+                    *next_pos_ptr.add(idx) = j - block_len;
                 }
                 let pos2 = *next_pos_ptr.add(idx + 1);
                 if pos2 != usize::MAX {
                     let mut j = pos2;
-                    while j < block_end {
+                    while j < block_len {
                         *buf_ptr.add(j) = (*buf_ptr.add(j)).wrapping_add(log);
                         j += p_us;
                     }
-                    *next_pos_ptr.add(idx + 1) = j;
+                    *next_pos_ptr.add(idx + 1) = j - block_len;
                 }
             }
             idx += 2;
         }
         // drain the large-prime hits that fall in this block
         for &packed in buckets.block(block_idx) {
-            // SAFETY: every bucket entry holds a position below total_len
+            // SAFETY: the entries of bucket block_idx hold positions of this block
             unsafe {
-                let slot = buf_ptr.add((packed & 0x00FF_FFFF) as usize);
+                let slot = buf_ptr.add(packed as usize & offset_mask);
                 *slot = (*slot).wrapping_add((packed >> 24) as u8);
             }
         }
-        block_start = block_end;
-        block_idx += 1;
+        let prof_t = profile.then(std::time::Instant::now);
+        on_block(block_start, sums);
+        if let Some(t) = prof_t {
+            prof_on_block += t.elapsed();
+        }
     }
 
     if let (Some(t0), Some(t1)) = (prof_t0, prof_t1) {
         SIEVE_SETUP_NANOS.fetch_add((t1 - t0).as_nanos() as u64, Ordering::Relaxed);
-        SIEVE_LOOP_NANOS.fetch_add(t1.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let block_loop = t1.elapsed() - prof_on_block;
+        SIEVE_LOOP_NANOS.fetch_add(block_loop.as_nanos() as u64, Ordering::Relaxed);
         SIEVE_CALLS.fetch_add(1, Ordering::Relaxed);
     }
-
-    logs[..ns].iter().map(|&l| l as u32).sum::<u32>()
 }
 
 #[cfg(test)]
@@ -317,18 +341,26 @@ mod tests {
         let mut scratch = SieveScratch::default();
         // block sizes that are tiny (many blocks), that don't divide total_len, and
         // that exceed total_len (single block): every prime above the size goes to
-        // the buckets
-        for &block_size in &[8usize, 16, 64, 256, 512, 1024, 4096] {
+        // the buckets. The scratch is reused, so each size must clear its blocks.
+        for &block_size in &[8usize, 16, 64, 256, 512, 1024, 4096, 64, 8] {
             let mut buf = vec![0u8; total_len];
+            let mut next_start = 0;
             sieve_over_factorbase_blocked(
                 sieve_interval_length,
                 &factorbase,
                 &roots,
                 &logs,
-                &mut buf,
                 &mut scratch,
                 block_size,
+                |block_start, sums| {
+                    // the blocks come in order, each complete
+                    assert_eq!(block_start, next_start);
+                    assert_eq!(sums.len(), block_size.min(total_len - block_start));
+                    buf[block_start..block_start + sums.len()].copy_from_slice(sums);
+                    next_start = block_start + sums.len();
+                },
             );
+            assert_eq!(next_start, total_len);
             assert_eq!(buf, want, "mismatch at block_size = {block_size}");
         }
     }

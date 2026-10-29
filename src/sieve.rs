@@ -9,6 +9,7 @@ use rug::{Complete, Integer};
 
 use crate::block_sieve::{
     SIEVE_CALLS, SIEVE_LOOP_NANOS, SIEVE_SETUP_NANOS, SieveScratch, sieve_over_factorbase_blocked,
+    skipped_logs,
 };
 use crate::factorbase::*;
 use crate::large_primes::PartialStore;
@@ -95,6 +96,8 @@ struct SieveParams {
     use_dlp: bool,
     // large-prime slack in bits: how much non-smooth cofactor a candidate may keep
     lp_slack: u32,
+    // the sum of the logs of the factor-base entries the sieve skips
+    skipped_logs: u32,
     // the size of a sieve block, a power of two
     block_size: usize,
 }
@@ -165,6 +168,7 @@ impl SieveParams {
             "lp slack multiplier: {:.2} ({lp_slack} bits)",
             lp_slack_multiplier(use_dlp, n_bits),
         );
+        let skipped = skipped_logs(&logs);
         Ok(SieveParams {
             k,
             kn,
@@ -177,6 +181,7 @@ impl SieveParams {
             large_prime_multiplier,
             use_dlp,
             lp_slack,
+            skipped_logs: skipped,
             block_size,
         })
     }
@@ -204,10 +209,14 @@ fn run_sieve_producer(
     sender: &mpsc::SyncSender<RelationMsg>,
 ) {
     let sieve_interval_length = params.sieve_interval_length;
+    let total_len = 2 * sieve_interval_length;
     let kn_bits = params.kn.significant_bits();
-    let mut logs_for_polynomial = vec![0u8; 2 * sieve_interval_length];
     // scratch reused across polynomials by the blocked sieve
     let mut sieve_scratch = SieveScratch::default();
+    // the sieve thresholds of a polynomial, one per scan window, reused across
+    // polynomials
+    const SCAN_WINDOW: usize = 16384;
+    let mut thresholds = Vec::new();
     // positions of a polynomial's candidates, reused across polynomials
     let mut candidates = Vec::new();
     let mut trial_division = TrialDivision::new(
@@ -239,21 +248,11 @@ fn run_sieve_producer(
         let prof_t0 = Instant::now();
         let (polynomial, roots) = polynomial_generator.next_polynomial();
         trace!("thread {index_thread}: next polynomial");
-        let prof_t1 = Instant::now();
-        let sum_small_logs = sieve_over_factorbase_blocked(
-            sieve_interval_length,
-            &params.factorbase,
-            roots,
-            &params.logs,
-            &mut logs_for_polynomial,
-            &mut sieve_scratch,
-            params.block_size,
-        );
-        // Per-block thresholds: log2|Q(x)| is not flat over the interval. It is
+        // Per-window thresholds: log2|Q(x)| is not flat over the interval. It is
         // ≈ log2(kn/a) over most of it but dips near the two roots of Q at
         // x ≈ ±M/√2, where smooth values are both likelier and cheaper. A single
         // threshold derived from the maximum misses those, so evaluate |Q| at each
-        // scan block's midpoint and give every block its own
+        // scan window's midpoint and give every window its own
         // threshold = log2|Q(mid)| − large-prime slack − sum of skipped small logs.
         // f64 is exact enough here: its absolute error ~2^(bits−52) is far below
         // |Q(x)| at any integer x.
@@ -261,13 +260,10 @@ fn run_sieve_producer(
         let a_f = polynomial.a.to_f64();
         let b_f = polynomial.b.to_f64();
         let c_f = polynomial.c.to_f64();
-        let prof_t2 = Instant::now();
-        let total = logs_for_polynomial.len();
-        const SCAN_BLOCK: usize = 16384;
-        candidates.clear();
-        for block_start in (0..total).step_by(SCAN_BLOCK) {
-            let block_end = (block_start + SCAN_BLOCK).min(total);
-            let x_mid = (block_start + block_end) as f64 / 2.0 - sieve_interval_length as f64;
+        thresholds.clear();
+        for window_start in (0..total_len).step_by(SCAN_WINDOW) {
+            let window_end = (window_start + SCAN_WINDOW).min(total_len);
+            let x_mid = (window_start + window_end) as f64 / 2.0 - sieve_interval_length as f64;
             let q_mid = (a_f * x_mid + 2.0 * b_f) * x_mid + c_f;
             // fall back to the global bound if SIQS_GLOBAL_THRESHOLD is set, if f64
             // overflowed (kn beyond ~2^1020), or if the midpoint sits implausibly
@@ -277,17 +273,47 @@ fn run_sieve_producer(
             } else {
                 log2_kn_over_a
             };
-            let threshold: u8 = q_bits
-                .saturating_sub(params.lp_slack)
-                .saturating_sub(sum_small_logs)
-                .clamp(1, u8::MAX as u32) as u8;
-            find_candidates(
-                &logs_for_polynomial[block_start..block_end],
-                threshold,
-                block_start,
-                &mut candidates,
+            thresholds.push(
+                q_bits
+                    .saturating_sub(params.lp_slack)
+                    .saturating_sub(params.skipped_logs)
+                    .clamp(1, u8::MAX as u32) as u8,
             );
         }
+        let prof_t1 = Instant::now();
+        // sieve block by block, and scan each block for candidates while it is in
+        // the cache
+        candidates.clear();
+        let mut prof_scan_blocks = Duration::ZERO;
+        sieve_over_factorbase_blocked(
+            sieve_interval_length,
+            &params.factorbase,
+            roots,
+            &params.logs,
+            &mut sieve_scratch,
+            params.block_size,
+            |block_start, sums| {
+                let prof_t = profile.then(Instant::now);
+                // the windows overlapping the block, cut at its ends
+                let block_end = block_start + sums.len();
+                let mut start = block_start;
+                while start < block_end {
+                    let window = start / SCAN_WINDOW;
+                    let end = ((window + 1) * SCAN_WINDOW).min(block_end);
+                    find_candidates(
+                        &sums[start - block_start..end - block_start],
+                        thresholds[window],
+                        start,
+                        &mut candidates,
+                    );
+                    start = end;
+                }
+                if let Some(t) = prof_t {
+                    prof_scan_blocks += t.elapsed();
+                }
+            },
+        );
+        let prof_t2 = Instant::now();
         prof_candidates += candidates.len() as u64;
         trial_division.find_divisors(&candidates, roots);
         for (candidate, &i) in candidates.iter().enumerate() {
@@ -309,8 +335,9 @@ fn run_sieve_producer(
         if profile {
             prof_polys += 1;
             prof_poly += prof_t1 - prof_t0;
-            prof_sieve += prof_t2 - prof_t1;
-            prof_scan += prof_t2.elapsed();
+            // the scans of the blocks count as scan+factor
+            prof_sieve += prof_t2 - prof_t1 - prof_scan_blocks;
+            prof_scan += prof_t2.elapsed() + prof_scan_blocks;
             if prof_polys.is_multiple_of(2000) {
                 // sieve-internal split, averaged across all threads' calls
                 let calls = SIEVE_CALLS.load(Ordering::Relaxed).max(1);

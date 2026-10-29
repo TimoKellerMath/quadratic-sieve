@@ -77,18 +77,24 @@ fn main() {
         // rotates. Every block size must give the same sums.
         for turn in 0..block_sizes.len() {
             let b = (i + turn) % block_sizes.len();
+            // the time of the sieve, without copying its blocks out
             let start = Instant::now();
+            let mut copy = Duration::ZERO;
             sieve_over_factorbase_blocked(
                 sieve_interval_length,
                 &factorbase,
                 roots,
                 &logs,
-                &mut buffer,
                 &mut scratch,
                 block_sizes[b],
+                |block_start, sums| {
+                    let start = Instant::now();
+                    buffer[block_start..block_start + sums.len()].copy_from_slice(sums);
+                    copy += start.elapsed();
+                },
             );
             if i > 0 {
-                times[b] += start.elapsed();
+                times[b] += start.elapsed() - copy;
             }
             if turn == 0 {
                 reference.copy_from_slice(&buffer);
